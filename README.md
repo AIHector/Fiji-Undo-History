@@ -91,7 +91,16 @@ A brush stroke is recorded in about 0.5 s at every size: there is a 0.3 s wait f
 
 ## Tips for big images
 
-- **2048×2048 16-bit images (common sCMOS cameras) cost twice their size in Fiji.** With large heaps, Java's G1 collector reserves a full 16 MB region for each 8 MB plane. This applies to the images themselves, not only to the history; a 1 GB stack measured 2 GB of heap. Adding the JVM option `-XX:G1HeapRegionSize=32m` brings it back to 1 GB. Undo History's own copies avoid the problem by using small chunks.
+- **Some plane sizes cost more heap than their size in Fiji, and there is no free fix.** With an 18 GB heap, Java's default G1 collector reserves whole 16 MB regions for planes of 8 MB or more. 2048×2048 16-bit planes take 2.0× their size, 2304×2304 take 1.6×, and 4096×4096 16-bit take 1.5×. Smaller planes are unaffected. Undo History's own copies avoid this (they are stored in small chunks), but the images themselves are not. A churn test (keep 6 GB of 1 GB stacks, create and drop 40 more) compared the alternatives:
+
+  | JVM setting | 2048² 16-bit cost | Time | Longest pause | Memory returned to the OS |
+  |---|---|---|---|---|
+  | G1 (Fiji default) | 2.0× | 3.8 s | 13 ms | yes |
+  | `-XX:G1HeapRegionSize=32m` | 1.0× | 8.6 s | 1.1 s | yes |
+  | `-XX:+UseZGC -XX:+ZGenerational` | 1.25× (but 2048² 8-bit 1.5×) | 4.3 s | < 1 ms | only after ~5 min |
+  | `-XX:+UseParallelGC` | 1.0× | 8.3 s | 1.3 s | no |
+
+  Fiji's default is the best all-round choice. Change it only if you always work with one plane size and are short of memory rather than time.
 - **Don't give Fiji more memory than the machine can spare.** If Fiji's maximum plus your other apps exceed physical RAM, macOS swaps and everything slows down, history included.
 - **Use Keep on important steps** so they survive when space runs short.
 
