@@ -30,6 +30,9 @@ public class Undo_History implements PlugIn {
 						if (v.rows.get(i).current) engine.togglePin(id, i);
 				break;
 			}
+			case "reopen":
+				if (!engine.reopenLast()) IJ.showStatus("Undo History: no closed image to reopen");
+				break;
 			case "clear":
 				if (currentID() != 0) engine.clear(currentID());
 				break;
@@ -57,6 +60,12 @@ public class Undo_History implements PlugIn {
 		gd.addCheckbox("Edit ▸ Undo (" + (IJ.isMacOSX() ? "⌘Z" : "Ctrl+Z") + ") steps back through the history", e.replaceUndo());
 		gd.addCheckbox("Redo with " + (IJ.isMacOSX() ? "⌘⌥Z" : "Ctrl+Alt+Z"), e.redoKey());
 		gd.addCheckbox("Start a new history when an image is saved", e.trimOnSave());
+		gd.addMessage("Also record as steps (each costs only what changed):");
+		gd.addCheckbox("Selections and overlays", Extras.trackSelections());
+		gd.addCheckbox("Display (B&C, LUT) and calibration", Extras.trackDisplay());
+		gd.addCheckbox("ROI Manager list", Extras.trackRoiManager());
+		gd.addCheckbox("Results table", Extras.trackResults());
+		gd.addNumericField("Closed images kept to reopen:", e.keepClosed(), 0, 4, "(their memory is given back first)");
 		gd.addCheckbox("Show the Undo History window when Fiji starts", Prefs.get(Engine.PREF + "showAtStartup", false));
 		gd.addMessage("Recent steps stay in memory; older ones move to the disk folder (use a fast SSD).\n"
 				+ "When both are full, the oldest steps are dropped. The opened state, saved states\n"
@@ -74,6 +83,11 @@ public class Undo_History implements PlugIn {
 		Prefs.set(Engine.PREF + "replaceUndo", gd.getNextBoolean());
 		Prefs.set(Engine.PREF + "redoKey", gd.getNextBoolean());
 		Prefs.set(Engine.PREF + "trimOnSave", gd.getNextBoolean());
+		Prefs.set(Engine.PREF + "trackSelections", gd.getNextBoolean());
+		Prefs.set(Engine.PREF + "trackDisplay", gd.getNextBoolean());
+		Prefs.set(Engine.PREF + "trackRoiManager", gd.getNextBoolean());
+		Prefs.set(Engine.PREF + "trackResults", gd.getNextBoolean());
+		Prefs.set(Engine.PREF + "keepClosed", Math.max(0, Math.min(50, (int) gd.getNextNumber())));
 		Prefs.set(Engine.PREF + "showAtStartup", gd.getNextBoolean());
 		Prefs.savePreferences();
 		e.settingsChanged();

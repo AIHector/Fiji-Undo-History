@@ -28,8 +28,14 @@ final class Snapshot {
 	final LUT lut;          // single-channel images
 	final LUT[] luts;       // composite images
 	final int compositeMode;
+	/** Selection, ROI Manager list, Results table, and the signatures used to compare states. */
+	final Extras extras;
+	/** True when only non-pixel parts changed: the planes are the previous step's. */
+	final boolean metaOnly;
 
-	private Snapshot(ImagePlus imp, Plane[] planes, String[] labels) {
+	private Snapshot(ImagePlus imp, Plane[] planes, String[] labels, Snapshot prev, Extras extras, boolean metaOnly) {
+		this.extras = extras;
+		this.metaOnly = metaOnly;
 		width = imp.getWidth();
 		height = imp.getHeight();
 		bitDepth = imp.getBitDepth();
@@ -40,7 +46,9 @@ final class Snapshot {
 		this.labels = labels;
 		cal = imp.getCalibration().copy();
 		Overlay ov = imp.getOverlay();
-		overlay = ov == null ? null : ov.duplicate();
+		// an unchanged overlay is shared with the previous step instead of copied again
+		overlay = ov == null ? null : prev != null && prev.extras.overlaySig == extras.overlaySig && prev.overlay != null
+				? prev.overlay : ov.duplicate();
 		min = imp.getDisplayRangeMin();
 		max = imp.getDisplayRangeMax();
 		if (imp.isComposite()) {
@@ -100,18 +108,46 @@ final class Snapshot {
 			for (Plane p : created) store.discard(p);
 			throw e;
 		}
-		if (!changed) return null;
-		return new Snapshot(imp, planes, labels);
+		Extras ex = Extras.capture(imp, prev == null ? null : prev.extras);
+		if (!changed) {
+			// same pixels: a step only if the selection, overlay, display, ROI Manager or Results changed
+			if (prev == null || ex.changeFrom(prev.extras) == null) return null;
+			return new Snapshot(imp, prev.planes, prev.labels, prev, ex, true);
+		}
+		return new Snapshot(imp, planes, labels, prev, ex, false);
 	}
 
-	/** Writes this state into {@code imp}. Caller must hold the engine lock. */
-	void restoreInto(ImagePlus imp, Store store) throws IOException {
+	/**
+	 * A step for a change that touched no pixels (a selection, an overlay edit, the ROI Manager...): compares only the
+	 * signatures, never reads the planes, and shares them with prev. Returns null when nothing tracked changed.
+	 */
+	static Snapshot captureMeta(ImagePlus imp, Snapshot prev) {
+		if (prev == null) return null;
+		boolean sameShape = prev.planes.length == imp.getStackSize() && prev.width == imp.getWidth()
+				&& prev.height == imp.getHeight() && prev.bitDepth == imp.getBitDepth();
+		if (!sameShape) return null;
+		Extras ex = Extras.capture(imp, prev.extras);
+		if (ex.changeFrom(prev.extras) == null) return null;
+		return new Snapshot(imp, prev.planes, prev.labels, prev, ex, true);
+	}
+
+	/** What changed from prev, as a step name, for steps that changed no pixels. */
+	String metaChange(Snapshot prev) {
+		return prev == null ? null : extras.changeFrom(prev.extras);
+	}
+
+	/** Writes this state into {@code imp}, coming from state {@code from}. Caller must hold the engine lock. */
+	void restoreInto(ImagePlus imp, Store store, Snapshot from) throws IOException {
 		boolean sameShape = imp.getStackSize() == planes.length
 				&& imp.getWidth() == width && imp.getHeight() == height
 				&& imp.getBitDepth() == bitDepth
 				&& imp.getNChannels() == nChannels && imp.getNSlices() == nSlices
 				&& imp.getNFrames() == nFrames;
-		if (sameShape) {
+		boolean samePlanes = sameShape && from != null && from.planes.length == planes.length;
+		for (int i = 0; samePlanes && i < planes.length; i++) samePlanes = from.planes[i] == planes[i];
+		if (samePlanes) {
+			// a step that changed no pixels (selection, overlay, ROI Manager...): the pixels are already right
+		} else if (sameShape) {
 			// Copy into the live arrays so CompositeImage channel processors,
 			// which hold references to them, see the new data. Needs no extra memory.
 			if (planes.length == 1) {
@@ -142,6 +178,7 @@ final class Snapshot {
 		imp.getProcessor().setSnapshotPixels(null);
 		imp.setCalibration(cal.copy());
 		imp.setOverlay(overlay == null ? null : overlay.duplicate());
+		extras.restore(imp, from == null ? null : from.extras);
 		if (imp.isComposite() && luts != null && ((CompositeImage) imp).getNChannels() == luts.length) {
 			CompositeImage ci = (CompositeImage) imp;
 			ci.setLuts(luts.clone());

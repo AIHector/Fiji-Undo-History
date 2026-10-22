@@ -11,6 +11,7 @@ import ij.WindowManager;
 import ij.gui.ImageCanvas;
 import ij.gui.ImageWindow;
 import ij.gui.Roi;
+import ij.gui.RoiListener;
 import ij.gui.Toolbar;
 import ij.macro.Interpreter;
 
@@ -51,7 +52,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * </ul>
  * Edit ▸ Undo (Cmd/Ctrl+Z) is redirected here; Cmd/Ctrl+Option/Alt+Z redoes.
  */
-final class Engine implements ImageListener, CommandListener {
+final class Engine implements ImageListener, CommandListener, RoiListener {
 
 	static final String PREF = "undohistory.";
 	static final long QUIET_MS = 300;
@@ -105,6 +106,8 @@ final class Engine implements ImageListener, CommandListener {
 	boolean replaceUndo() { return Prefs.get(PREF + "replaceUndo", true); }
 	boolean redoKey() { return Prefs.get(PREF + "redoKey", true); }
 	boolean trimOnSave() { return Prefs.get(PREF + "trimOnSave", false); }
+	/** How many closed images keep their history (to reopen them, or for a command that replaces an image). */
+	int keepClosed() { return (int) Prefs.get(PREF + "keepClosed", 5); }
 
 	private void applySettings() {
 		store.ramBudget = ramBudgetBytes();
@@ -120,6 +123,8 @@ final class Engine implements ImageListener, CommandListener {
 	private final Map<Integer, History> histories = new ConcurrentHashMap<>();
 	private final ConcurrentLinkedQueue<Object[]> pendingOpen = new ConcurrentLinkedQueue<>(); // {ImagePlus, label}
 	private final ConcurrentLinkedQueue<History> pendingClose = new ConcurrentLinkedQueue<>();
+	/** Histories of closed images, most recently closed first. Their memory is the first to be given back. */
+	private final java.util.Deque<History> closed = new java.util.ArrayDeque<>();
 	final Store store = new Store(this::dropOldestStep);
 	private final List<Thread> commandThreads = Collections.synchronizedList(new ArrayList<Thread>());
 	private final CopyOnWriteArrayList<Runnable> changeListeners = new CopyOnWriteArrayList<>();
@@ -138,6 +143,7 @@ final class Engine implements ImageListener, CommandListener {
 		applySettings();
 		Executer.addCommandListener(this);
 		ImagePlus.addImageListener(this);
+		Roi.addRoiListener(this);
 		int[] ids = WindowManager.getIDList();
 		if (ids != null) {
 			lock.lock();
@@ -155,8 +161,11 @@ final class Engine implements ImageListener, CommandListener {
 					mouseDown = true;
 					if (e.getSource() instanceof ImageCanvas)
 						commitBeforeStroke(((ImageCanvas) e.getSource()).getImage());
-				} else if (e.getID() == MouseEvent.MOUSE_RELEASED)
+				} else if (e.getID() == MouseEvent.MOUSE_RELEASED) {
 					mouseDown = false;
+					// a tool may have edited the overlay or the selection without touching the pixels
+					if (e.getSource() instanceof ImageCanvas) metaChanged(((ImageCanvas) e.getSource()).getImage(), null);
+				}
 			}
 		}, AWTEvent.MOUSE_EVENT_MASK);
 		KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(e -> {
@@ -170,6 +179,8 @@ final class Engine implements ImageListener, CommandListener {
 			new Thread(this::redoActive, "UndoHistory-redo").start();
 			return true;
 		});
+		lastRmQuick = quickRm();
+		lastRtQuick = quickRt();
 		ticker = new Thread(this::tickLoop, "UndoHistory-ticker");
 		ticker.setDaemon(true);
 		ticker.start();
@@ -197,10 +208,31 @@ final class Engine implements ImageListener, CommandListener {
 		h.touched.add(imp.getCurrentSlice()); // the stroke about to start paints this plane
 	}
 
+	/** A selection was drawn, moved, changed or removed. */
+	public void roiModified(ImagePlus imp, int id) {
+		if (!running || imp == null || id == RoiListener.MODIFIED && mouseDown) return; // drags end with COMPLETED or a release
+		metaChanged(imp, "Selection");
+	}
+
+	/** Something that is not pixels may have changed: checked by signature at the next quiet moment. */
+	private void metaChanged(ImagePlus imp, String what) {
+		History h = imp == null ? null : histories.get(imp.getID());
+		if (h == null || h.restoring || !h.restoreSettled || h.untracked != null) return;
+		if (!h.dirty) h.metaOnly = true;
+		h.dirty = true;
+		h.lastUpdate = System.currentTimeMillis();
+		if (h.pendingCommand == null && h.pendingTool == null && what != null) h.pendingTool = what;
+	}
+
 	public void imageClosed(ImagePlus imp) {
 		History h = histories.remove(imp.getID());
 		lastViews.remove(imp.getID());
 		if (h != null) {
+			h.closedAt = System.currentTimeMillis();
+			h.title = imp.getTitle();
+			h.closedBy = liveCommandThread() != null || macroRunning() ? lastCommand : null;
+			ImageWindow w = imp.getWindow();
+			if (w != null) h.lastLocation = w.getLocation();
 			pendingClose.add(h);
 			if (lock.tryLock()) {
 				try { processCloses(); } finally { lock.unlock(); }
@@ -217,6 +249,7 @@ final class Engine implements ImageListener, CommandListener {
 		if (h == null || h.restoring || !h.restoreSettled) return; // notices queued by our own restore
 		if (traceUpdates) new Throwable("imageUpdated " + imp.getTitle() + " on " + Thread.currentThread().getName()).printStackTrace(System.out);
 		h.dirty = true;
+		h.metaOnly = false;
 		h.lastUpdate = System.currentTimeMillis();
 		if (h.pendingCommand == null) {
 			Thread busyThread = liveCommandThread();
@@ -287,6 +320,7 @@ final class Engine implements ImageListener, CommandListener {
 			h.pendingCommand = cmd;
 			h.pendingTool = null;
 			h.dirty = true;
+			h.metaOnly = false;
 			h.lastUpdate = System.currentTimeMillis();
 			// Menu commands run in their own thread, which ends with the command;
 			// macro commands share the macro's thread, so they end at the next command or the macro's end.
@@ -325,6 +359,7 @@ final class Engine implements ImageListener, CommandListener {
 		}
 		boolean macro = macroRunning();
 		long now = System.currentTimeMillis();
+		pollShared(now);
 		lock.lock();
 		try {
 			processQueues();
@@ -332,12 +367,50 @@ final class Engine implements ImageListener, CommandListener {
 				h.threads.removeIf(t -> !t.isAlive());
 				if (h.dirty && h.threads.isEmpty() && !macro && !mouseDown && now - h.lastUpdate >= QUIET_MS)
 					flush(h);
+				if (h.dirty && h.metaOnly && !h.threads.isEmpty()) h.metaOnly = false; // a command is still running on it
 				boolean changes = h.imp.changes;
 				if (h.lastChanges && !changes && !h.dirty && h.untracked == null)
 					markSaved(h);
 				h.lastChanges = changes;
 			}
 		} finally { lock.unlock(); }
+	}
+
+	private long lastSharedPoll, lastRmQuick, lastRtQuick;
+
+	/**
+	 * The ROI Manager and the Results table can change without a menu command (their own buttons): every half second
+	 * a quick signature is compared, and a change becomes a step of the active image.
+	 */
+	private void pollShared(long now) {
+		if (now - lastSharedPoll < 500) return;
+		lastSharedPoll = now;
+		long rm = Extras.trackRoiManager() ? quickRm() : 0, rt = Extras.trackResults() ? quickRt() : 0;
+		boolean rmChanged = rm != lastRmQuick, rtChanged = rt != lastRtQuick;
+		lastRmQuick = rm;
+		lastRtQuick = rt;
+		if (!rmChanged && !rtChanged) return;
+		ImagePlus imp = WindowManager.getCurrentImage();
+		if (imp != null) metaChanged(imp, rmChanged ? "ROI Manager" : "Results");
+	}
+
+	private static long quickRm() {
+		ij.plugin.frame.RoiManager m = ij.plugin.frame.RoiManager.getRawInstance();
+		if (m == null) return 0;
+		Roi[] list = m.getRoisAsArray();
+		long h = 7 + list.length;
+		for (Roi r : list) h = h * 31 + r.getBounds().hashCode() * 7 + (r.getName() == null ? 0 : r.getName().hashCode());
+		return h;
+	}
+
+	private static long quickRt() {
+		ij.measure.ResultsTable t = ij.plugin.filter.Analyzer.getResultsTable();
+		if (t == null) return 0;
+		long h = 11 + t.size();
+		String heads = t.getColumnHeadings();
+		h = h * 31 + (heads == null ? 0 : heads.hashCode());
+		if (t.size() > 0) h = h * 31 + t.getRowAsString(t.size() - 1).hashCode();
+		return h;
 	}
 
 	private void processQueues() {
@@ -348,11 +421,96 @@ final class Engine implements ImageListener, CommandListener {
 		store.enforce();
 	}
 
+	/**
+	 * A closed image's history is kept (up to keepClosed() of them) so the image can be reopened with its history,
+	 * and so that a command that replaces an image by a new window (Make Composite...) can hand the history over.
+	 */
 	private void processCloses() {
 		History h;
-		while ((h = pendingClose.poll()) != null)
-			for (State s : h.states) release(s.snap);
+		while ((h = pendingClose.poll()) != null) {
+			History heir = h.closedBy == null ? null : heirOf(h);
+			if (heir != null) { adopt(h, heir); continue; }
+			if (keepClosed() > 0 && h.untracked == null && !h.states.isEmpty()) {
+				closed.addFirst(h);
+				while (closed.size() > keepClosed()) releaseAll(closed.removeLast());
+			} else releaseAll(h);
+		}
 	}
+
+	private void releaseAll(History h) {
+		for (State s : h.states) release(s.snap);
+		h.states.clear();
+	}
+
+	/** An image the same command opened with the same title, that has only its first state: it replaces the closed one. */
+	private History heirOf(History gone) {
+		for (History h : histories.values())
+			if (h.states.size() == 1 && gone.closedBy.equals(h.createdBy) && h.imp.getTitle().equals(gone.title)) return h;
+		return null;
+	}
+
+	/** A closed image's history from the same command and with the same title as a newly opened image. */
+	private History ancestorOf(History born) {
+		if (born.createdBy == null) return null;
+		long now = System.currentTimeMillis();
+		for (History c : closed)
+			if (born.createdBy.equals(c.closedBy) && now - c.closedAt < 30000 && c.title.equals(born.imp.getTitle())) return c;
+		return null;
+	}
+
+	/**
+	 * The new image continues the old one's history: the old steps (up to where it was) come first, the new image as
+	 * it appeared is the last step, named after the command. Going back to an older step brings the old kind of image
+	 * back in place of the new window.
+	 */
+	private void adopt(History old, History heir) {
+		closed.remove(old);
+		while (old.states.size() > old.cursor + 1) release(old.states.remove(old.states.size() - 1).snap);
+		State born = heir.states.get(0);
+		born.label = pretty(heir.createdBy);
+		born.pinned = false;
+		heir.states.clear();
+		heir.states.addAll(old.states);
+		heir.states.add(born);
+		heir.cursor = heir.states.size() - 1;
+		heir.dropped += old.dropped;
+		old.states.clear();
+		enforceStepLimit(heir);
+		fireChanged();
+	}
+
+	/** Reopens the most recently closed image, with its history. Returns false if there is none. */
+	boolean reopenLast() {
+		History h;
+		lock.lock();
+		try {
+			processQueues();
+			h = closed.pollFirst();
+			if (h == null) return false;
+			State s = h.states.get(h.cursor);
+			ImagePlus n;
+			try {
+				n = s.snap.toImage(h.title, store);
+			} catch (IOException e) {
+				IJ.error("Undo History", "Could not rebuild " + h.title + ":\n" + e.getMessage());
+				releaseAll(h);
+				return false;
+			}
+			h.imp = n;
+			h.closedBy = null;
+			h.createdBy = null;
+			histories.put(n.getID(), h);
+			n.changes = !s.clean;
+			h.lastChanges = n.changes;
+			n.show();
+			if (h.lastLocation != null && n.getWindow() != null) n.getWindow().setLocation(h.lastLocation);
+		} finally { lock.unlock(); }
+		IJ.showStatus("Undo History: reopened " + h.title + " (" + h.states.size() + " steps)");
+		fireChanged();
+		return true;
+	}
+
+	int closedCount() { return closed.size(); }
 
 	// ---- core (caller holds the lock) -----------------------------------
 
@@ -363,9 +521,12 @@ final class Engine implements ImageListener, CommandListener {
 		if (histories.containsKey(imp.getID()) || imp.getWindow() == null) return;
 		processCloses(); // memory of images closed a moment ago is free again
 		History h = new History(imp);
+		if (label.startsWith("Created by ")) h.createdBy = lastCommand;
 		histories.put(imp.getID(), h);
 		captureBaseline(h, label);
 		h.lastChanges = imp.changes;
+		History old = h.states.size() == 1 ? ancestorOf(h) : null;
+		if (old != null) adopt(old, h);
 		fireChanged();
 	}
 
@@ -416,6 +577,7 @@ final class Engine implements ImageListener, CommandListener {
 		}
 		if (h.untracked != null || h.states.isEmpty() || !h.dirty) return;
 		ImagePlus imp = h.imp;
+		if (imp.getProcessor() == null || !histories.containsKey(imp.getID())) { h.dirty = false; return; } // closing
 		if (isPasting(imp)) return; // wait until the paste is committed
 		h.dirty = false;
 		State cur = h.states.get(h.cursor);
@@ -428,7 +590,10 @@ final class Engine implements ImageListener, CommandListener {
 				only = new java.util.HashSet<>(h.touched); // tool strokes on a big stack: check only the planes they touched
 			h.touched.clear();
 			h.nonToolUpdate = false;
-			s = Snapshot.capture(imp, cur.snap, store, System.currentTimeMillis(), only);
+			boolean metaOnly = h.metaOnly;
+			h.metaOnly = false;
+			s = metaOnly ? Snapshot.captureMeta(imp, cur.snap)
+					: Snapshot.capture(imp, cur.snap, store, System.currentTimeMillis(), only);
 			h.problem = null;
 		} catch (Store.NoRoomException e) {
 			h.problem = "Last change not recorded: " + e.getMessage();
@@ -439,14 +604,33 @@ final class Engine implements ImageListener, CommandListener {
 			return;
 		}
 		lastCaptureMs = (System.nanoTime() - t0) / 1e6;
+		boolean fromCommand = h.pendingCommand != null;
 		String label = h.pendingCommand != null ? pretty(h.pendingCommand)
 				: h.pendingTool != null ? h.pendingTool : "Edit";
 		h.pendingCommand = null;
 		h.pendingTool = null;
 		if (s == null) { noChangeCaptures++; return; }
+		if (s.metaOnly && !fromCommand) {
+			// no pixels changed and no command ran: name the step after what changed
+			String what = s.metaChange(cur.snap);
+			if (what != null) label = what;
+		}
 		while (h.states.size() > h.cursor + 1)
 			release(h.states.remove(h.states.size() - 1).snap);
+		if (s.metaOnly && (label.equals("Selection") || label.equals("Display")) && h.cursor > 0
+				&& cur.snap.metaOnly && cur.label.equals(label) && !cur.pinned && !cur.saved) {
+			// a run of selection (or display) changes is one step: the latest replaces the previous one
+			retain(s, System.currentTimeMillis());
+			release(cur.snap);
+			State st = new State(label, s);
+			st.clean = cur.clean && !imp.changes;
+			h.states.set(h.cursor, st);
+			fireChanged();
+			return;
+		}
 		State st = new State(label, s);
+		// a selection, display or ROI Manager change leaves the image as saved, as in ImageJ (no "Save changes?")
+		if (s.metaOnly) st.clean = cur.clean && !imp.changes;
 		h.states.add(st);
 		h.cursor = h.states.size() - 1;
 		retain(s, st.time);
@@ -465,10 +649,17 @@ final class Engine implements ImageListener, CommandListener {
 						+ "To keep them, cancel and save a copy first (File > Save As),\n"
 						+ "or give the history more room (Undo History > Options).\n \nDiscard the unrecorded changes?"))
 			return;
+		if ((s.snap.luts != null) != imp.isComposite()) { // a composite and a plain image: one cannot become the other in place
+			replaceWindow(h, k);
+			return;
+		}
 		h.restoring = true;
 		h.restoreSettled = false;
 		try {
-			s.snap.restoreInto(imp, store);
+			// the image matches the current step unless its latest change could not be recorded
+			Snapshot from = h.problem == null && k != h.cursor && h.cursor >= 0 && h.cursor < h.states.size()
+					? h.states.get(h.cursor).snap : null;
+			s.snap.restoreInto(imp, store, from);
 			h.cursor = k;
 		} catch (IOException e) {
 			IJ.error("Undo History", "Could not restore \"" + s.label + "\":\n" + e.getMessage());
@@ -485,6 +676,34 @@ final class Engine implements ImageListener, CommandListener {
 		Undo.reset();
 		imp.changes = !s.clean;
 		h.lastChanges = imp.changes;
+		IJ.showStatus("Undo History: " + s.label + " (" + k + "/" + (h.states.size() - 1) + ")");
+		fireChanged();
+	}
+
+	/** Shows step k as a new window in place of the image's window, which closes; the history moves with it. */
+	private void replaceWindow(History h, int k) {
+		State s = h.states.get(k);
+		ImagePlus old = h.imp;
+		ImagePlus n;
+		try {
+			n = s.snap.toImage(old.getTitle(), store);
+		} catch (IOException e) {
+			IJ.error("Undo History", "Could not restore \"" + s.label + "\":\n" + e.getMessage());
+			return;
+		}
+		java.awt.Point loc = old.getWindow() != null ? old.getWindow().getLocation() : null;
+		histories.remove(old.getID());
+		h.imp = n;
+		h.cursor = k;
+		h.dirty = false;
+		h.problem = null;
+		histories.put(n.getID(), h);
+		n.changes = !s.clean;
+		h.lastChanges = n.changes;
+		n.show();
+		if (loc != null && n.getWindow() != null) n.getWindow().setLocation(loc);
+		old.changes = false;
+		old.close(); // no history is attached to it any more: closing it releases nothing
 		IJ.showStatus("Undo History: " + s.label + " (" + k + "/" + (h.states.size() - 1) + ")");
 		fireChanged();
 	}
@@ -516,8 +735,12 @@ final class Engine implements ImageListener, CommandListener {
 		}
 	}
 
-	/** Drops the oldest droppable step of any image (called by the store when it needs room). */
+	/** Gives back the memory of closed images first, then drops the oldest droppable step of any image. */
 	boolean dropOldestStep() {
+		if (!closed.isEmpty()) {
+			releaseAll(closed.removeLast());
+			return true;
+		}
 		History best = null;
 		int bestIdx = -1;
 		long bestTime = Long.MAX_VALUE;
@@ -712,6 +935,15 @@ final class Engine implements ImageListener, CommandListener {
 	}
 
 	long usedBytes() { return store.ramBytes; }
+
+	/** Heap held by the current step's selection, ROI Manager list and Results table, not shared with the step before. */
+	long currentExtraBytes(int imageID) {
+		History h = histories.get(imageID);
+		if (h == null || h.cursor < 1) return -1;
+		lock.lock();
+		try { return h.states.get(h.cursor).snap.extras.ownBytes(h.states.get(h.cursor - 1).snap.extras); }
+		finally { lock.unlock(); }
+	}
 	long diskBytes() { return store.diskBytes; }
 	int trackedImages() { return histories.size(); }
 
@@ -803,7 +1035,12 @@ final class Engine implements ImageListener, CommandListener {
 	}
 
 	static final class History {
-		final ImagePlus imp;
+		volatile ImagePlus imp;
+		volatile String title;
+		/** The command that opened this image (when a command did), and the command running when it closed. */
+		volatile String createdBy, closedBy;
+		volatile long closedAt;
+		volatile java.awt.Point lastLocation;
 		final List<State> states = new ArrayList<>();
 		final List<Thread> threads = new CopyOnWriteArrayList<>();
 		int cursor = -1;
@@ -814,9 +1051,11 @@ final class Engine implements ImageListener, CommandListener {
 		/** Planes touched by interactive tools since the last step (1-based), and whether anything else changed. */
 		final Set<Integer> touched = ConcurrentHashMap.newKeySet();
 		volatile boolean nonToolUpdate;
+		/** Dirty only through non-pixel events (selection, overlay, ROI Manager): compare signatures, not planes. */
+		volatile boolean metaOnly;
 		volatile long lastUpdate;
 		volatile String pendingCommand, pendingTool;
 		boolean lastChanges;
-		History(ImagePlus imp) { this.imp = imp; }
+		History(ImagePlus imp) { this.imp = imp; this.title = imp.getTitle(); }
 	}
 }

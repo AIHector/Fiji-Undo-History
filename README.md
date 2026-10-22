@@ -26,6 +26,7 @@ To uninstall, delete those two files.
 | Open a step as a new image (compare before/after) | Select the row, then **Copy** |
 | Never drop a step when space runs out | Select the row, then **Keep** |
 | Forget the steps of one image | **Clear** |
+| Bring back an image you closed, with its history | *Plugins ▸ Undo History ▸ Reopen Closed Image* |
 | Settings | **Options…**, or *Plugins ▸ Undo History ▸ Undo History Options…* |
 
 Each of these counts as one step:
@@ -34,6 +35,7 @@ Each of these counts as one step:
 - each `run("…")` call inside a macro
 - each brush, pencil or flood-fill stroke (one per mouse press)
 - an "Apply" from a tool window such as Brightness/Contrast
+- a change that touches no pixels: a selection drawn, moved or removed ("Selection"), an overlay edit (Add Selection, Remove Overlay, labels...), the display range or LUT ("Display"), the calibration (Set Scale, Properties...), the ROI Manager's list ("ROI Manager", also from its own buttons) and the Results table (Measure, Clear Results...). Such a step shares all its pixels with the step before, so it costs only the part that changed. A run of selection changes, or of display changes, is merged into one step.
 
 In the window, `▶` marks the current state, and grey italic rows are steps you can redo. If you undo and then make a new change, the redo steps are discarded, the same as in any editor.
 
@@ -71,6 +73,11 @@ The footer of the window shows how much memory and disk the history is using.
 | Redo with ⌘⌥Z / Ctrl+Alt+Z | on |
 | Start a new history when an image is saved | off |
 | Show the Undo History window when Fiji starts | off |
+| Also record: selections and overlays | on |
+| Also record: display (B&C, LUT) and calibration | on |
+| Also record: ROI Manager list | on |
+| Also record: Results table | on |
+| Closed images kept to reopen | 5 |
 
 ## Performance with big images
 
@@ -89,6 +96,19 @@ A brush stroke is recorded in about 0.5 s at every size: there is a 0.3 s wait f
 - **What limits the time.** Most of the time goes into disk writes. Writes reached 1 GB/s normally, but only 0.3 GB/s while macOS was swapping, because Fiji's memory setting plus open apps exceeded the physical RAM.
 - **How big images can get.** The limit comes from memory plus disk space, not from the plugin. Each whole-stack step of a 6 GB image needs 6 GB somewhere. For images of several GB, point the disk folder to an external SSD with plenty of space.
 
+### Cost of the non-pixel steps
+
+Measured with the test suite (Apple Silicon Mac, Java 21):
+
+| Change | Memory per step |
+|---|---|
+| Selection, overlay edit, display range, calibration | no pixel memory (the planes are shared with the step before) |
+| ROI Manager with 5000 ROIs: first copy | about 1.6 MB, once |
+| ...then each added or changed ROI | about 80 KB (one ROI plus the list of references) |
+| Results table of 20000 rows × 20 columns: first copy | about 3.1 MB, once |
+| ...then each new measurement | about 85 KB (one 1024-row block per column) |
+| Reopening a closed image, a command replacing an image | nothing extra (the steps are the ones already stored) |
+
 ## Tips for big images
 
 - **Some plane sizes cost more heap than their size in Fiji, and there is no free fix.** With an 18 GB heap, Java's default G1 collector reserves whole 16 MB regions for planes of 8 MB or more. 2048×2048 16-bit planes take 2.0× their size, 2304×2304 take 1.6×, and 4096×4096 16-bit take 1.5×. Smaller planes are unaffected. Undo History's own copies avoid this (they are stored in small chunks), but the images themselves are not. A churn test (keep 6 GB of 1 GB stacks, create and drop 40 more) compared the alternatives:
@@ -106,9 +126,15 @@ A brush stroke is recorded in about 0.5 s at every size: there is a 0.3 s wait f
 
 ## What it does not track
 
-- **Selections and display settings on their own.** Moving the B&C sliders or changing the LUT is not a step. Each step does store and restore the display range, LUTs, calibration and overlay that belong to it.
-- **Commands that close an image and open a new one** (Make Composite, Stack to Hyperstack, Duplicate, …). The new image starts its own history.
-- **Plugins with their own windows and undo** (SNT, TrackMate, Labkit, …). Those keep their own undo.
+- **Plugins with their own data and undo** (SNT paths, TrackMate tracks, Labkit labels, the 3D Viewer). Those keep their own undo.
+- **Results tables other than the main "Results" window** (for example tables named by a plugin), and the ROI Manager's selection or display options.
+- **Commands that make a new image from an image that stays open** (Duplicate, Z Project, Split Channels...): the new image starts its own history, the original keeps its own.
+
+Commands that **replace** an image by a new window with the same title (Make Composite, for example) are followed: the new window continues the old window's history. Undoing past that step brings the old kind of image back in its place.
+
+**Closed images.** The last 5 closed images keep their history (Options: *Closed images kept to reopen*), so *Reopen Closed Image* brings an image back with all its steps. Their memory is the first to be given back when the history needs room.
+
+**Shared windows.** The ROI Manager and the Results table belong to no single image: a change to them becomes a step of the active image. Undo restores them only when they changed within that image's own history.
 
 ## Build and test
 
@@ -121,7 +147,7 @@ You need a Fiji installation; its bundled Java is used.
 ./bench.sh 1024 2048 4096               # size ladder in MB (needs RAM; HEAP=18g and PCT=20 are optional)
 ```
 
-`test.sh` checks 47 behaviours:
+`test.sh` checks 84 behaviours:
 
 - menu and macro commands
 - brush strokes
@@ -137,6 +163,10 @@ You need a Fiji installation; its bundled Java is used.
 - brush strokes on a 300 MB stack checking only the touched plane
 - a command run the instant an image opens
 - the window
+- selections, overlays, display range and calibration as steps (no pixel memory; a 300-plane stack's selection step takes 0.1 ms and reads no planes)
+- the ROI Manager list and the Results table as steps, restored by undo
+- closed images reopened with their history, and closed images giving their memory back first
+- Make Composite: the new window continues the history, and undo brings back the RGB image
 
 Tested with ImageJ 1.54p and Java 21 (Fiji 2.18) on macOS. The jar targets Java 8. Windows and Linux are expected to work but have not been tested yet. Reports are welcome.
 
