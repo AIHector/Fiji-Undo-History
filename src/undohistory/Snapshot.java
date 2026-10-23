@@ -28,6 +28,7 @@ final class Snapshot {
 	final LUT lut;          // single-channel images
 	final LUT[] luts;       // composite images
 	final int compositeMode;
+	final boolean[] activeChannels; // composite images: the channels ticked in the Channels Tool
 	/** Selection, ROI Manager list, Results table, and the signatures used to compare states. */
 	final Extras extras;
 	/** True when only non-pixel parts changed: the planes are the previous step's. */
@@ -55,10 +56,13 @@ final class Snapshot {
 			LUT[] l = ((CompositeImage) imp).getLuts();
 			luts = l == null ? null : l.clone();
 			compositeMode = ((CompositeImage) imp).getMode();
+			boolean[] a = ((CompositeImage) imp).getActiveChannels();
+			activeChannels = a == null ? null : a.clone();
 			lut = null;
 		} else {
 			luts = null;
 			compositeMode = -1;
+			activeChannels = null;
 			ImageProcessor ip = imp.getProcessor();
 			lut = (bitDepth == 24 || ip == null) ? null : ip.getLut();
 		}
@@ -183,7 +187,9 @@ final class Snapshot {
 			CompositeImage ci = (CompositeImage) imp;
 			ci.setLuts(luts.clone());
 			if (compositeMode > 0) ci.setMode(compositeMode);
+			setActive(ci, activeChannels);
 			ci.updateAllChannelsAndDraw();
+			ij.plugin.frame.Channels.updateChannels(); // the Channels Tool shows the restored ticks
 		} else {
 			if (lut != null && !imp.isComposite())
 				imp.getProcessor().setLut(lut);
@@ -203,6 +209,7 @@ final class Snapshot {
 		if (nChannels > 1 && bitDepth != 24) {
 			CompositeImage ci = new CompositeImage(imp, compositeMode > 0 ? compositeMode : CompositeImage.COMPOSITE);
 			if (luts != null && luts.length == nChannels) ci.setLuts(luts.clone());
+			setActive(ci, activeChannels);
 			imp = ci;
 		} else if (nSlices > 1 && nFrames > 1 || nFrames > 1 && nChannels > 1) {
 			imp.setOpenAsHyperStack(true);
@@ -214,5 +221,11 @@ final class Snapshot {
 			if (bitDepth != 24) imp.setDisplayRange(min, max);
 		}
 		return imp;
+	}
+
+	/** Ticks the saved channels (getActiveChannels() is the image's own array, so it is filled in place). */
+	static void setActive(CompositeImage ci, boolean[] saved) {
+		boolean[] a = ci.getActiveChannels();
+		if (saved != null && a != null && a.length == saved.length) System.arraycopy(saved, 0, a, 0, a.length);
 	}
 }

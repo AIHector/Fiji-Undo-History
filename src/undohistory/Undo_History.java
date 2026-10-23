@@ -59,6 +59,8 @@ public class Undo_History implements PlugIn {
 		gd.addNumericField("Maximum steps per image:", e.maxSteps(), 0, 6, "");
 		gd.addCheckbox("Edit ▸ Undo (" + (IJ.isMacOSX() ? "⌘Z" : "Ctrl+Z") + ") steps back through the history", e.replaceUndo());
 		gd.addCheckbox("Redo with " + (IJ.isMacOSX() ? "⌘⌥Z" : "Ctrl+Alt+Z"), e.redoKey());
+		gd.addCheckbox("Redo also with " + (IJ.isMacOSX() ? "⌘⇧Z" : "Ctrl+Shift+Z")
+				+ " (the Channels Tool then opens from Image ▸ Color only)", e.redoShiftZ());
 		gd.addCheckbox("Start a new history when an image is saved", e.trimOnSave());
 		gd.addMessage("Also record as steps (each costs only what changed):");
 		gd.addCheckbox("Selections and overlays", Extras.trackSelections());
@@ -82,6 +84,7 @@ public class Undo_History implements PlugIn {
 		Prefs.set(Engine.PREF + "maxSteps", Math.max(1, (int) gd.getNextNumber()));
 		Prefs.set(Engine.PREF + "replaceUndo", gd.getNextBoolean());
 		Prefs.set(Engine.PREF + "redoKey", gd.getNextBoolean());
+		Prefs.set(Engine.PREF + "redoShiftZ", gd.getNextBoolean());
 		Prefs.set(Engine.PREF + "trimOnSave", gd.getNextBoolean());
 		Prefs.set(Engine.PREF + "trackSelections", gd.getNextBoolean());
 		Prefs.set(Engine.PREF + "trackDisplay", gd.getNextBoolean());

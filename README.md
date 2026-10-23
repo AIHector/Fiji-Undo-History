@@ -6,6 +6,8 @@
   <img alt="Tested with Fiji 2.18 / ImageJ 1.54p" src="https://img.shields.io/badge/tested%20with-Fiji%202.18%20%2F%20ImageJ%201.54p-1f6feb">
   <img alt="Java 8 or later" src="https://img.shields.io/badge/Java-8%2B-e76f00">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-2ea043"></a>
+  <img alt="Developed on macOS" src="https://img.shields.io/badge/developed%20on-macOS-555555">
+  <img alt="Windows and Linux: not yet tested" src="https://img.shields.io/badge/Windows%20%26%20Linux-not%20yet%20tested-lightgrey">
   <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AIHector/Fiji-Undo-History?color=8250df"></a>
 </p>
 
@@ -38,7 +40,7 @@ ImageJ 1.x, the engine underneath Fiji, keeps one undo buffer. Undo reverts only
 ## Install
 
 1. Download `Undo_History-<version>.zip` from the [Releases](../../releases) page and unzip it.
-2. Copy the two files into your Fiji folder (on macOS, `Fiji.app` or the folder that contains it):
+2. Copy the two files into your Fiji folder (the one that contains `plugins/` and `macros/`: `Fiji.app` on Windows and Linux; on macOS, `Fiji.app` or the folder that contains it):
    - `Undo_History.jar` → `plugins/`
    - `Undo_History_Startup.ijm` → `macros/AutoRun/` (this starts tracking every time Fiji launches)
 3. Restart Fiji.
@@ -48,6 +50,8 @@ To uninstall, delete those two files.
 ## Three plugins that work together
 
 Each plugin works on its own; installed together, they share the screen and each other's commands.
+
+All three are written in Java 8 for any system Fiji runs on, and their shortcuts follow your system: **Cmd** on macOS, **Ctrl** on Windows and Linux. So far they have been tested on macOS only; reports from Windows and Linux are welcome in each repository's *Issues*.
 
 | Plugin | What it gives you |
 |---|---|
@@ -65,13 +69,15 @@ Each plugin works on its own; installed together, they share the screen and each
 | Action | How |
 |---|---|
 | Step back | **Edit ▸ Undo**, **⌘Z** on macOS, **Ctrl+Z** on Windows/Linux. Each press goes back one step |
-| Step forward (redo) | **⌘⌥Z** / **Ctrl+Alt+Z**, or **Edit ▸ Redo** |
+| Step forward (redo) | **⌘⌥Z** / **Ctrl+Alt+Z**, or **Edit ▸ Redo**; optionally also **⌘⇧Z** / **Ctrl+Shift+Z** (see [Options](#options)) |
 | See every step, jump to any of them | **Edit ▸ Undo History…** and click a row |
 | Open a step as a new image (compare before/after) | Select the row, then **Copy** |
 | Never drop a step when space runs out | Select the row, then **Keep** |
 | Forget the steps of one image | **Clear** |
 | Bring back an image you closed, with its history | *Plugins ▸ Undo History ▸ Reopen Closed Image* |
 | Settings | **Options…**, or *Plugins ▸ Undo History ▸ Undo History Options…* |
+
+On Windows and Linux the AltGr key is reported as Ctrl+Alt, and on some keyboards AltGr+Z types a letter (ż in Polish). While a text field has the focus, Ctrl+Alt+Z is therefore left to the field: click the image first, or use **Edit ▸ Redo**.
 
 Each of these counts as one step:
 
@@ -115,6 +121,7 @@ The footer of the window shows how much memory and disk the history is using.
 | Maximum steps per image | 100 |
 | Edit ▸ Undo steps back through the history | on (off = ImageJ's single undo) |
 | Redo with ⌘⌥Z / Ctrl+Alt+Z | on |
+| Redo also with ⌘⇧Z / Ctrl+Shift+Z | off |
 | Start a new history when an image is saved | off |
 | Show the Undo History window when Fiji starts | off |
 | Also record: selections and overlays | on |
@@ -122,6 +129,8 @@ The footer of the window shows how much memory and disk the history is using.
 | Also record: ROI Manager list | on |
 | Also record: Results table | on |
 | Closed images kept to reopen | 5 |
+
+**Why redo is not ⌘⇧Z / Ctrl+Shift+Z by default.** ImageJ already uses that key to open *Image ▸ Color ▸ Channels Tool…*, and ⌘Y / Ctrl+Y (the usual redo on Windows) for *Edit ▸ Selection ▸ Properties…*. Turning on *Redo also with ⌘⇧Z* gives the key to *Edit ▸ Redo*: the Edit menu then shows it, and the Channels Tool opens from its menu (or from a shortcut you give it in *Plugins ▸ Shortcuts ▸ Add Shortcut…*). Turning the option off gives the key back to the Channels Tool. Changes made in the Channels Tool (mode, colours, ticked channels) are *Display* steps, so they are undone and redone like any other step.
 
 ## Performance with big images
 
@@ -191,7 +200,7 @@ You need a Fiji installation; its bundled Java is used.
 ./bench.sh 1024 2048 4096               # size ladder in MB (needs RAM; HEAP=18g and PCT=20 are optional)
 ```
 
-`test.sh` checks 84 behaviours:
+`test.sh` checks 90 behaviours:
 
 - menu and macro commands
 - brush strokes
@@ -201,7 +210,8 @@ You need a Fiji installation; its bundled Java is used.
 - save marks
 - memory limits and dropping
 - the disk tier: exact restores from disk, hash detection of unchanged planes
-- composite images
+- composite images, including the channels ticked in the Channels Tool
+- the optional ⌘⇧Z / Ctrl+Shift+Z redo key, taken from the Channels Tool and given back
 - the prompt before discarding unrecorded changes, and retrying an image that had no room when it opened
 - no wasted re-check after an undo
 - brush strokes on a 300 MB stack checking only the touched plane

@@ -105,6 +105,69 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	int maxSteps() { return (int) Prefs.get(PREF + "maxSteps", 100); }
 	boolean replaceUndo() { return Prefs.get(PREF + "replaceUndo", true); }
 	boolean redoKey() { return Prefs.get(PREF + "redoKey", true); }
+	/** Cmd/Ctrl+Shift+Z redoes, instead of opening Image ▸ Color ▸ Channels Tool... (ImageJ's own use of that key). */
+	boolean redoShiftZ() { return Prefs.get(PREF + "redoShiftZ", false); }
+
+	static final String CHANNELS_TOOL = "Channels Tool...";
+	/** ImageJ's shortcut table keys a Shift shortcut as its key code + 200. */
+	static final Integer SHIFT_Z = KeyEvent.VK_Z + 200;
+
+	/**
+	 * What the Shift+Z entry of ImageJ's shortcut table becomes: "Redo" when the option is on; the Channels Tool
+	 * again when it is turned off and the entry is still ours; otherwise null (leave it: the user may have given
+	 * the key to another command).
+	 */
+	static String shiftZCommand(String current, boolean on) {
+		if (on) return "Redo".equals(current) ? null : "Redo";
+		return "Redo".equals(current) ? CHANNELS_TOOL : null;
+	}
+
+	/**
+	 * Gives Cmd/Ctrl+Shift+Z to Edit ▸ Redo, or back to the Channels Tool: in ImageJ's shortcut table (used when an
+	 * ImageJ window has the keyboard) and on the two menu items, which show the key and receive it from the macOS
+	 * menu bar.
+	 */
+	static void applyShiftZ(final boolean on) {
+		EventQueue.invokeLater(() -> {
+			@SuppressWarnings("unchecked")
+			java.util.Hashtable<Integer, String> table = ij.Menus.getShortcuts();
+			if (table == null) return;
+			String next = shiftZCommand(table.get(SHIFT_Z), on);
+			if (next == null) return;
+			table.put(SHIFT_Z, next);
+			java.awt.MenuItem redo = findItem(ij.Menus.getMenuBar(), "Redo");
+			java.awt.MenuItem channels = findItem(ij.Menus.getMenuBar(), CHANNELS_TOOL);
+			java.awt.MenuShortcut key = new java.awt.MenuShortcut(KeyEvent.VK_Z, true);
+			if (on) {
+				if (channels != null) channels.deleteShortcut();
+				if (redo != null) redo.setShortcut(key);
+			} else {
+				if (redo != null) redo.deleteShortcut();
+				if (channels != null) channels.setShortcut(key);
+			}
+		});
+	}
+
+	static java.awt.MenuItem findItem(java.awt.MenuBar bar, String label) {
+		if (bar == null) return null;
+		for (int i = 0; i < bar.getMenuCount(); i++) {
+			java.awt.MenuItem it = findItem(bar.getMenu(i), label);
+			if (it != null) return it;
+		}
+		return null;
+	}
+
+	private static java.awt.MenuItem findItem(java.awt.Menu m, String label) {
+		if (m == null) return null;
+		for (int i = 0; i < m.getItemCount(); i++) {
+			java.awt.MenuItem it = m.getItem(i);
+			if (it instanceof java.awt.Menu) {
+				java.awt.MenuItem found = findItem((java.awt.Menu) it, label);
+				if (found != null) return found;
+			} else if (it != null && label.equals(it.getLabel())) return it;
+		}
+		return null;
+	}
 	boolean trimOnSave() { return Prefs.get(PREF + "trimOnSave", false); }
 	/** How many closed images keep their history (to reopen them, or for a command that replaces an image). */
 	int keepClosed() { return (int) Prefs.get(PREF + "keepClosed", 5); }
@@ -174,16 +237,29 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			boolean cmd = IJ.isMacOSX() ? e.isMetaDown() : e.isControlDown();
 			if (!cmd || !e.isAltDown() || e.isShiftDown())
 				return false;
+			if (altGrInText(IJ.isMacOSX(), e.isControlDown(), e.isAltDown(), focusInText()))
+				return false; // AltGr+Z types a letter on some keyboards (ż in Polish): leave it to the text field
 			if (WindowManager.getCurrentImage() == null)
 				return false;
 			new Thread(this::redoActive, "UndoHistory-redo").start();
 			return true;
 		});
+		applyShiftZ(redoShiftZ());
 		lastRmQuick = quickRm();
 		lastRtQuick = quickRt();
 		ticker = new Thread(this::tickLoop, "UndoHistory-ticker");
 		ticker.setDaemon(true);
 		ticker.start();
+	}
+
+	/** On Windows and Linux the AltGr key is reported as Ctrl+Alt; in a text field it may be typing a character. */
+	static boolean altGrInText(boolean mac, boolean ctrl, boolean alt, boolean textFocus) {
+		return !mac && ctrl && alt && textFocus;
+	}
+
+	static boolean focusInText() {
+		java.awt.Component f = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
+		return f instanceof java.awt.TextComponent || f instanceof javax.swing.text.JTextComponent;
 	}
 
 	// ---- listeners (must never block: some fire on the event thread) ----
@@ -861,6 +937,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	}
 
 	void settingsChanged() {
+		applyShiftZ(redoShiftZ());
 		lock.lock();
 		try {
 			applySettings();

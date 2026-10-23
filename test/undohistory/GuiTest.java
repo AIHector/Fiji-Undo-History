@@ -202,6 +202,30 @@ public class GuiTest {
 		check("composite: invert changed channel 2, undo restored it",
 				changed && Arrays.equals(ch2, (byte[]) ci.getStack().getPixels(2)));
 
+		// 13b. Unticking a channel (as in the Channels Tool) is a Display step; undo and redo restore the ticks
+		int c0 = cursor(ci); // the Invert step above was undone: the new step replaces it
+		ci.getActiveChannels()[1] = false;
+		ci.updateAllChannelsAndDraw();
+		waitFor(() -> cursor(ci) == c0 + 1, 4000);
+		check("unticking channel 2 is a step (" + last(ci) + ")", cursor(ci) == c0 + 1 && last(ci).equals("Display"));
+		engine.goTo(ci.getID(), c0);
+		check("undo ticks channel 2 again", ci.getActiveChannels()[1]);
+		engine.goTo(ci.getID(), c0 + 1);
+		check("redo unticks it", !ci.getActiveChannels()[1]);
+
+		// 13c. Cmd/Ctrl+Shift+Z for Redo (an option): the key moves from the Channels Tool to Redo, and back
+		check("Shift+Z rule: on takes it, off gives back only our own entry",
+				"Redo".equals(Engine.shiftZCommand(Engine.CHANNELS_TOOL, true)) && Engine.shiftZCommand("Redo", true) == null
+				&& Engine.CHANNELS_TOOL.equals(Engine.shiftZCommand("Redo", false)) && Engine.shiftZCommand("Duplicate...", false) == null);
+		java.util.Hashtable<?, ?> keys = ij.Menus.getShortcuts();
+		Object keyBefore = keys.get(Engine.SHIFT_Z);
+		Engine.applyShiftZ(true);
+		java.awt.EventQueue.invokeAndWait(() -> { });
+		check("option on: Shift+Z runs Redo (was " + keyBefore + ")", "Redo".equals(keys.get(Engine.SHIFT_Z)));
+		Engine.applyShiftZ(false);
+		java.awt.EventQueue.invokeAndWait(() -> { });
+		check("option off: Shift+Z opens the Channels Tool again", Engine.CHANNELS_TOOL.equals(keys.get(Engine.SHIFT_Z)));
+
 		// 14. Closing an image frees its memory (when closed images are not kept), or keeps it for Reopen, given back first
 		Prefs.set(Engine.PREF + "keepClosed", 0);
 		long beforeClose = engine.usedBytes();
