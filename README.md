@@ -1,10 +1,39 @@
-# Undo History for Fiji
+<h1 align="center">Undo History for Fiji</h1>
 
-**Multi-level undo and redo for Fiji / ImageJ 1.x**, with a history panel that lets you jump back to any step since the image was opened.
+<p align="center"><b>Multi-level undo and redo for Fiji / ImageJ 1.x, with a history panel that lets you jump back to any step since the image was opened.</b></p>
+
+<p align="center">
+  <img alt="Tested with Fiji 2.18 / ImageJ 1.54p" src="https://img.shields.io/badge/tested%20with-Fiji%202.18%20%2F%20ImageJ%201.54p-1f6feb">
+  <img alt="Java 8 or later" src="https://img.shields.io/badge/Java-8%2B-e76f00">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-2ea043"></a>
+  <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AIHector/Fiji-Undo-History?color=8250df"></a>
+</p>
+
+<p align="center">
+  <a href="#why">Why</a> ·
+  <a href="#highlights">Highlights</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#use">Use</a> ·
+  <a href="#how-it-stores-the-history-memory-first-then-disk">Memory and disk</a> ·
+  <a href="#tips-for-big-images">Big images</a>
+</p>
+
+![The Undo History window: every step of the active image, with the current state marked](docs/history-window.png)
+
+## Why
 
 ImageJ 1.x, the engine underneath Fiji, keeps one undo buffer. Undo reverts only the last filter or edit, and only on the image you edited last. Edit ▸ Options ▸ Memory & Threads ▸ *Keep multiple undo buffers* only gives each image its own single buffer. It does not add more levels. Undo History keeps a full history for every open image, starting from the state the image had when you opened it.
 
-![Undo History window](docs/history-window.png)
+## Highlights
+
+| Feature | What you get |
+|---|---|
+| **Undo as far back as you need** | **⌘Z** / **Ctrl+Z** steps back again and again; **⌘⌥Z** / **Ctrl+Alt+Z** steps forward |
+| **A panel with every step** | click any step to go back to it; copy a step as a new image to compare before and after |
+| **More than pixels** | selections, overlays, display range and LUTs, calibration, the ROI Manager list and the Results table are steps too |
+| **Closed by mistake?** | *Reopen Closed Image* brings an image back with its whole history |
+| **Light on memory** | a step that changes no pixels shares the planes of the step before; older steps move to disk when the memory budget is full; the budget and the disk folder are settings |
+| **Works with macros** | each `run("…")` call in a macro is one step |
 
 ## Install
 
@@ -15,6 +44,21 @@ ImageJ 1.x, the engine underneath Fiji, keeps one undo buffer. Undo reverts only
 3. Restart Fiji.
 
 To uninstall, delete those two files.
+
+## Three plugins that work together
+
+Each plugin works on its own; installed together, they share the screen and each other's commands.
+
+| Plugin | What it gives you |
+|---|---|
+| [**Side Toolbar**](https://github.com/AIHector/Fiji-Side-Toolbar) | Fiji's toolbar as a vertical bar you can reshape freely, plus a shelf for open tools, live image previews and macro buttons |
+| [**Window Layouts**](https://github.com/AIHector/Fiji-Window-Layouts) | Ten numbered window layouts, snap zones and exact saving of any arrangement, with a keyboard shortcut for each |
+| **Undo History** (this one) | Multi-level undo and redo with a history panel: pixels, selections, overlays, display, calibration, ROI Manager and Results |
+
+- **Window Layouts** keeps every layout clear of Side Toolbar's bars and status strip, and re-arranges the windows when a bar changes size or place.
+- **Side Toolbar**'s image previews offer Window Layouts' placements (halves, thirds, quarters, other display, layouts 0 to 9) and Undo History's steps in their right-click menu.
+- **Side Toolbar** adds an *Undo History* button to the bar when Undo History is installed, and **Window Layouts** places the Undo History window like any other tool window.
+
 
 ## Use
 
