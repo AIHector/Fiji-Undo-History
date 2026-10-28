@@ -3,7 +3,6 @@ package undohistory;
 import ij.CompositeImage;
 import ij.IJ;
 import ij.ImagePlus;
-import ij.Prefs;
 import ij.gui.Overlay;
 import ij.gui.Roi;
 import ij.gui.TextRoi;
@@ -24,13 +23,6 @@ import java.awt.Color;
  */
 final class Extras {
 
-	static final String PREF = Engine.PREF;
-
-	static boolean trackSelections() { return Prefs.get(PREF + "trackSelections", true); }
-	static boolean trackDisplay() { return Prefs.get(PREF + "trackDisplay", true); }
-	static boolean trackRoiManager() { return Prefs.get(PREF + "trackRoiManager", true); }
-	static boolean trackResults() { return Prefs.get(PREF + "trackResults", true); }
-
 	/** The last copies made, shared by every image whose step sees the same ROIs or table. */
 	private static Roi[] lastRm;
 	private static long[] lastRmSigs;
@@ -50,11 +42,11 @@ final class Extras {
 		this.rm = rm; this.rmSigs = rmSigs; this.rmSig = rmSig; this.rt = rt; this.rtSig = rtSig;
 	}
 
-	/** Captures the parts of the image's state that are tracked, sharing the unchanged ones with prev. */
+	/** Captures these parts of the image's state, sharing the unchanged ones with prev. */
 	static Extras capture(ImagePlus imp, Extras prev) {
 		Roi live = Engine.isPasting(imp) ? null : imp.getRoi();
 		long rs = sig(live);
-		Roi roi = !trackSelections() || live == null ? null : prev != null && prev.roiSig == rs && prev.roi != null ? prev.roi : (Roi) live.clone();
+		Roi roi = live == null ? null : prev != null && prev.roiSig == rs && prev.roi != null ? prev.roi : (Roi) live.clone();
 		long os = sig(imp.getOverlay());
 		long ds = displaySig(imp);
 		long cs = calSig(imp.getCalibration());
@@ -62,7 +54,7 @@ final class Extras {
 		Roi[] rm = null;
 		long[] rmSigs = null;
 		long ms = 0;
-		RoiManager m = trackRoiManager() ? RoiManager.getRawInstance() : null;
+		RoiManager m = RoiManager.getRawInstance();
 		if (m != null) {
 			Roi[] list = m.getRoisAsArray();
 			rmSigs = new long[list.length];
@@ -86,7 +78,7 @@ final class Extras {
 		}
 		TableCopy rt = null;
 		long ts = 0;
-		ResultsTable live2 = trackResults() ? Analyzer.getResultsTable() : null;
+		ResultsTable live2 = Analyzer.getResultsTable();
 		if (live2 != null && (live2.size() > 0 || live2.getLastColumn() >= 0)) {
 			ts = sig(live2);
 			if (prev != null && prev.rtSig == ts) rt = prev.rt;
@@ -102,12 +94,12 @@ final class Extras {
 	/** What differs from another state, as a step name ("Selection", "Overlay", ...), or null if nothing does. */
 	String changeFrom(Extras o) {
 		if (o == null) return null;
-		if (trackSelections() && overlaySig != o.overlaySig) return "Overlay";
-		if (trackRoiManager() && rm != null && rmSig != o.rmSig) return "ROI Manager";
-		if (trackResults() && rtSig != o.rtSig) return "Results";
-		if (trackDisplay() && calSig != o.calSig) return "Calibration";
-		if (trackDisplay() && displaySig != o.displaySig) return "Display";
-		if (trackSelections() && roiSig != o.roiSig) return "Selection";
+		if (overlaySig != o.overlaySig) return "Overlay";
+		if (rm != null && rmSig != o.rmSig) return "ROI Manager";
+		if (rtSig != o.rtSig) return "Results";
+		if (calSig != o.calSig) return "Calibration";
+		if (displaySig != o.displaySig) return "Display";
+		if (roiSig != o.roiSig) return "Selection";
 		return null;
 	}
 
@@ -118,16 +110,14 @@ final class Extras {
 	 * the snapshot itself.
 	 */
 	void restore(ImagePlus imp, Extras from) {
-		if (trackSelections()) {
-			if (roi != null) imp.setRoi((Roi) roi.clone());
-			else if (imp.getRoi() != null) imp.deleteRoi();
-		}
-		if (trackRoiManager() && rm != null && from != null && from.rmSig != rmSig) {
+		if (roi != null) imp.setRoi((Roi) roi.clone());
+		else if (imp.getRoi() != null) imp.deleteRoi();
+		if (rm != null && from != null && from.rmSig != rmSig) {
 			RoiManager m = RoiManager.getRoiManager();
 			m.reset();
 			for (Roi r : rm) m.addRoi((Roi) r.clone());
 		}
-		if (trackResults() && from != null && from.rtSig != rtSig) {
+		if (from != null && from.rtSig != rtSig) {
 			ResultsTable t = rt != null ? rt.toTable() : new ResultsTable();
 			if (rt == null && !IJ.isResultsWindow()) Analyzer.setResultsTable(t);
 			else t.show("Results"); // becomes the system Results table, with its window

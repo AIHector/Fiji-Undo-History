@@ -43,9 +43,9 @@ public class GuiTest {
 		Prefs.set(Engine.PREF + "useDisk", false);
 		Prefs.set(Engine.PREF + "diskFolder", new File(outDir, "spill").getPath());
 		Prefs.set(Engine.PREF + "testDiskMB", 300);
-		Prefs.set(Engine.PREF + "maxSteps", 100);
-		Prefs.set(Engine.PREF + "replaceUndo", true);
 		Prefs.set(Engine.PREF + "trimOnSave", false);
+		Prefs.set(Engine.PREF + "offerDisk", false); // section 31 tests the offer
+		Prefs.set(Engine.PREF + "redoShiftZ", true);
 		new ImageJ(ImageJ.NO_SHOW);
 		new Undo_History().run("start");
 		engine = Engine.get();
@@ -669,6 +669,95 @@ public class GuiTest {
 			}
 		}
 
+		// 30. No step limit: the memory budget is the only limit
+		ImagePlus manySteps = new ImagePlus("many-steps", noise(64, 64, 30));
+		manySteps.show();
+		waitFor(() -> rows(manySteps) == 1, 5000);
+		Thread lots = new Thread(() -> { for (int i = 0; i < 105; i++) IJ.run(manySteps, "Invert", ""); }, "macro-thread");
+		lots.start();
+		lots.join();
+		waitFor(() -> rows(manySteps) == 106, 8000);
+		check("no step limit: 105 commands keep 105 steps (" + (rows(manySteps) - 1) + ")", rows(manySteps) == 106 && view(manySteps).dropped == 0);
+		manySteps.changes = false;
+		manySteps.close();
+
+		// 31. Memory full with the disk off: Undo History offers the disk once, then records the refused change
+		Prefs.set(Engine.PREF + "testMemoryMB", 6);
+		Prefs.set(Engine.PREF + "useDisk", false);
+		Prefs.set(Engine.PREF + "offerDisk", true);
+		engine.settingsChanged();
+		ImagePlus full = new ImagePlus("offer-disk-test", new FloatProcessor(1024, 1024, randomFloats(1024 * 1024)));
+		full.show();
+		waitFor(() -> rows(full) == 1, 5000);
+		float[] fullOpened = ((float[]) full.getProcessor().getPixels()).clone();
+		menu("Invert", full, -1);
+		java.awt.Dialog ask = null;
+		for (int i = 0; i < 100 && ask == null; i++) {
+			Thread.sleep(50);
+			for (Window x : Window.getWindows())
+				if (x instanceof ij.gui.GenericDialog && x.isVisible() && "Undo History".equals(((java.awt.Dialog) x).getTitle()))
+					ask = (java.awt.Dialog) x;
+		}
+		check("memory full, disk off: the disk is offered", ask != null);
+		java.awt.Button yes = ask == null ? null : findButton(ask, "Keep older steps on disk");
+		if (yes != null) {
+			final java.awt.Button y = yes;
+			EventQueue.invokeAndWait(() -> y.dispatchEvent(new java.awt.event.ActionEvent(y, java.awt.event.ActionEvent.ACTION_PERFORMED, y.getLabel())));
+		}
+		waitFor(() -> rows(full) == 2 && view(full).problem == null, 5000);
+		check("accepting turns the disk on and records the refused change (" + labels(full) + ", "
+				+ engine.diskBytes() / 1048576 + " MB on disk)",
+				Prefs.get(Engine.PREF + "useDisk", false) && rows(full) == 2 && last(full).equals("Invert") && view(full).problem == null);
+		engine.goTo(full.getID(), 0);
+		check("and undo is exact", Arrays.equals(fullOpened, (float[]) full.getProcessor().getPixels()));
+		String spill = engine.store.sessionDirPath();
+		check("the history spilled to disk (" + spill + ")", spill != null && new File(spill).isDirectory());
+
+		// 32. Stop: everything is forgotten and freed, ImageJ gets Undo and Shift+Z back
+		WindowManagerHelper.activate(full);
+		check("before stopping there are steps to forget (" + engine.recordedSteps() + ")", engine.recordedSteps() > 0);
+		engine.stop();
+		EventQueue.invokeAndWait(() -> { });
+		check("stop: not running, nothing tracked", !Engine.isRunning() && engine.trackedImages() == 0 && engine.closedCount() == 0);
+		check("stop: memory and disk freed (" + engine.usedBytes() + " B, " + engine.diskBytes() + " B)",
+				engine.usedBytes() == 0 && engine.diskBytes() == 0);
+		check("stop: the spill folder is deleted", spill == null || !new File(spill).exists());
+		check("stop: Shift+Z opens the Channels Tool again", Engine.CHANNELS_TOOL.equals(keys.get(Engine.SHIFT_Z)));
+		full.changes = false;
+		full.close();
+		Prefs.set(Engine.PREF + "testMemoryMB", 512);
+		Prefs.set(Engine.PREF + "useDisk", false);
+		Prefs.set(Engine.PREF + "offerDisk", false);
+		engine.settingsChanged();
+		ImagePlus off = new ImagePlus("stopped-test", noise(128, 128, 32));
+		off.show();
+		Thread.sleep(500);
+		byte[] offOpened = pix(off);
+		menu("Invert", off, -1);
+		check("stopped: a new image and a command are not recorded", engine.view(off.getID()) == null);
+		IJ.doCommand("Undo");
+		Thread.sleep(600);
+		check("stopped: Edit > Undo is ImageJ's own undo", Arrays.equals(offOpened, pix(off)));
+
+		// 33. Start again, and the startup macro: it records only when "Record from the moment Fiji starts" is on
+		Prefs.set(Engine.PREF + "startAtLaunch", false);
+		Prefs.set(Engine.PREF + "showAtStartup", false);
+		IJ.runMacro("call(\"undohistory.Undo_History.autostart\");");
+		check("startup macro with the option off: not recording", !Engine.isRunning());
+		Prefs.set(Engine.PREF + "startAtLaunch", true);
+		IJ.runMacro("call(\"undohistory.Undo_History.autostart\");");
+		waitFor(() -> view(off) != null, 3000);
+		check("startup macro with the option on: recording, open images tracked (" + (view(off) == null ? "-" : labels(off)) + ")",
+				Engine.isRunning() && view(off) != null && labels(off).equals("[Tracking started]"));
+		EventQueue.invokeAndWait(() -> { });
+		check("started: Shift+Z is Redo again", "Redo".equals(keys.get(Engine.SHIFT_Z)));
+		menu("Invert", off, 2);
+		IJ.doCommand("Undo");
+		waitFor(() -> cursor(off) == 0, 3000);
+		check("started: Edit > Undo steps through the history again", cursor(off) == 0);
+		off.changes = false;
+		off.close();
+
 		// 21. The window renders
 		WindowManagerHelper.activate(imp);
 		EventQueue.invokeAndWait(HistoryWindow::showWindow);
@@ -723,6 +812,17 @@ public class GuiTest {
 			c.dispatchEvent(new MouseEvent(c, MouseEvent.MOUSE_RELEASED, t + 21, 0, x1, y1, 1, false, MouseEvent.BUTTON1));
 		});
 		Thread.sleep(50);
+	}
+
+	static java.awt.Button findButton(java.awt.Container c, String label) {
+		for (java.awt.Component k : c.getComponents()) {
+			if (k instanceof java.awt.Button && label.equals(((java.awt.Button) k).getLabel())) return (java.awt.Button) k;
+			if (k instanceof java.awt.Container) {
+				java.awt.Button b = findButton((java.awt.Container) k, label);
+				if (b != null) return b;
+			}
+		}
+		return null;
 	}
 
 	static Engine.View view(ImagePlus imp) {

@@ -7,7 +7,7 @@
   <img alt="Java 8 or later" src="https://img.shields.io/badge/Java-8%2B-e76f00">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-2ea043"></a>
   <img alt="Developed on macOS" src="https://img.shields.io/badge/developed%20on-macOS-555555">
-  <img alt="Windows and Linux: not yet tested" src="https://img.shields.io/badge/Windows%20%26%20Linux-not%20yet%20tested-lightgrey">
+  <img alt="Windows: tested by a user; Linux: test suite passes" src="https://img.shields.io/badge/Windows%20%26%20Linux-tested-2ea043">
   <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/AIHector/Fiji-Undo-History?color=8250df"></a>
 </p>
 
@@ -30,11 +30,12 @@ ImageJ 1.x, the engine underneath Fiji, keeps one undo buffer. Undo reverts only
 
 | Feature | What you get |
 |---|---|
-| **Undo as far back as you need** | **⌘Z** / **Ctrl+Z** steps back again and again; **⌘⌥Z** / **Ctrl+Alt+Z** steps forward |
+| **Undo as far back as you need** | **⌘Z** / **Ctrl+Z** steps back again and again; **⌘⇧Z** / **Ctrl+Shift+Z** (or **⌘⌥Z** / **Ctrl+Alt+Z**) steps forward |
 | **A panel with every step** | click any step to go back to it; copy a step as a new image to compare before and after |
 | **More than pixels** | selections, overlays, display range and LUTs, calibration, the ROI Manager list and the Results table are steps too |
-| **Closed by mistake?** | *Reopen Closed Image* brings an image back with its whole history |
-| **Light on memory** | a step that changes no pixels shares the planes of the step before; older steps move to disk when the memory budget is full; the budget and the disk folder are settings |
+| **Closed by mistake?** | *Edit ▸ Reopen Closed Image* brings an image back with its whole history |
+| **Light on memory** | a step that changes no pixels shares the planes of the step before; when the memory budget is full, older steps can move to disk (off until you turn it on) |
+| **On when you want it** | *Start/Stop* in the window or the Edit menu; stopping forgets the history and frees its memory and disk space |
 | **Works with macros** | each `run("…")` call in a macro is one step |
 
 ## Install
@@ -42,8 +43,10 @@ ImageJ 1.x, the engine underneath Fiji, keeps one undo buffer. Undo reverts only
 1. Download `Undo_History-<version>.zip` from the [Releases](../../releases) page and unzip it.
 2. Copy the two files into your Fiji folder (the one that contains `plugins/` and `macros/`: `Fiji.app` on Windows and Linux; on macOS, `Fiji.app` or the folder that contains it):
    - `Undo_History.jar` → `plugins/`
-   - `Undo_History_Startup.ijm` → `macros/AutoRun/` (this starts tracking every time Fiji launches)
+   - `Undo_History_Startup.ijm` → `macros/AutoRun/` (this starts Undo History every time Fiji launches)
 3. Restart Fiji.
+
+When you update from an earlier version, replace both files: the startup macro changed in 1.2.0.
 
 To uninstall, delete those two files.
 
@@ -51,7 +54,7 @@ To uninstall, delete those two files.
 
 Each plugin works on its own; installed together, they share the screen and each other's commands.
 
-All three are written in Java 8 for any system Fiji runs on, and their shortcuts follow your system: **Cmd** on macOS, **Ctrl** on Windows and Linux. So far they have been tested on macOS only; reports from Windows and Linux are welcome in each repository's *Issues*.
+All three are written in Java 8 for any system Fiji runs on, and their shortcuts follow your system: **Cmd** on macOS, **Ctrl** on Windows and Linux. Undo History has been tried on Windows by a user and its test suite passes on Linux; the other two have been tested on macOS only. Reports are welcome in each repository's *Issues*.
 
 | Plugin | What it gives you |
 |---|---|
@@ -69,13 +72,16 @@ All three are written in Java 8 for any system Fiji runs on, and their shortcuts
 | Action | How |
 |---|---|
 | Step back | **Edit ▸ Undo**, **⌘Z** on macOS, **Ctrl+Z** on Windows/Linux. Each press goes back one step |
-| Step forward (redo) | **⌘⌥Z** / **Ctrl+Alt+Z**, or **Edit ▸ Redo**; optionally also **⌘⇧Z** / **Ctrl+Shift+Z** (see [Options](#options)) |
+| Step forward (redo) | **⌘⇧Z** / **Ctrl+Shift+Z**, **⌘⌥Z** / **Ctrl+Alt+Z**, or **Edit ▸ Redo** |
 | See every step, jump to any of them | **Edit ▸ Undo History…** and click a row |
 | Open a step as a new image (compare before/after) | Select the row, then **Copy** |
 | Never drop a step when space runs out | Select the row, then **Keep** |
 | Forget the steps of one image | **Clear** |
-| Bring back an image you closed, with its history | *Plugins ▸ Undo History ▸ Reopen Closed Image* |
-| Settings | **Options…**, or *Plugins ▸ Undo History ▸ Undo History Options…* |
+| Bring back an image you closed, with its history | **Edit ▸ Reopen Closed Image** |
+| Stop recording (forget every history, free its memory and disk), or start again | **Start/Stop** at the top of the window, or **Edit ▸ Start/Stop Undo History** |
+| Settings | **Options…**, or **Edit ▸ Undo History Options…** |
+
+Undo History starts with Fiji and shows its window; both can be turned off in the [Options](#options). While it is stopped, Edit ▸ Undo is ImageJ's own single undo and **⌘⇧Z** / **Ctrl+Shift+Z** opens the Channels Tool again.
 
 On Windows and Linux the AltGr key is reported as Ctrl+Alt, and on some keyboards AltGr+Z types a letter (ż in Polish). While a text field has the focus, Ctrl+Alt+Z is therefore left to the field: click the image first, or use **Edit ▸ Redo**.
 
@@ -98,39 +104,38 @@ ImageJ's own undo still handles what the history does not cover, such as a selec
 Each step stores only the planes that changed, and unchanged planes are shared between steps. A brush stroke on 1 plane of a 500-plane stack costs 1 plane. A filter applied to the whole stack costs a full copy.
 
 - **Memory.** By default the history may use up to **33% of Fiji's maximum memory** (Edit ▸ Options ▸ Memory & Threads). In addition, **20% of Fiji's memory always stays free** for your own work, so the history never causes an out-of-memory error. Copies are stored in small chunks, which avoids a Java effect that can double the real cost of large planes (see [Tips](#tips-for-big-images)).
-- **Disk.** When memory is full, older steps move to a disk folder, and they are read back when you undo to them. By default the folder is the system temp folder. You can choose the folder and the space it may use; the automatic setting is half of the free space, at most 50 GB. At least 5 GB always stays free on that disk. A fast SSD (internal or USB-C/Thunderbolt) makes a big difference.
+- **Disk (off by default).** When it is on and memory is full, older steps move to a disk folder, and they are read back when you undo to them. The folder is the system temp folder unless you choose another, and the history may use up to **33% of the free space** on that disk. At least 5 GB always stays free there. A fast SSD (internal or USB-C/Thunderbolt) makes a big difference.
+  - The first time memory runs out and a change cannot be recorded, Undo History asks whether to keep older steps on disk. Answer *Keep older steps on disk* and the change is recorded at once; the choice is saved in the Options.
 - **When both are full,** the oldest steps of any image are dropped first. The opened state, saved states and steps you marked **Keep** are never dropped. If even that is not enough, the change is not recorded and the window says so in red.
   - In that case, Undo asks before going back, because going back would throw your latest, unrecorded changes away. You can cancel, then save a copy or give the history more room.
 - **Not tracked:**
   - images larger than the memory plus disk budget
   - virtual stacks (their planes already live on disk)
   - batch-mode images that are never displayed
-- **Cleanup.** Spill files are deleted when an image is closed and when Fiji quits. Folders left behind by a crash are cleaned at the next start.
+- **Cleanup.** Spill files are deleted when an image is closed, when you stop Undo History, and when Fiji quits. Folders left behind by a crash are cleaned at the next start.
 
 The footer of the window shows how much memory and disk the history is using.
 
 ### Options
 
+*Edit ▸ Undo History Options…*
+
 | Option | Default |
 |---|---|
 | Memory for history | 33% of Fiji's memory |
-| When memory is full, keep older steps on disk | on |
+| When memory is full, keep older steps on disk | off |
 | Disk folder | system temp folder `/FijiUndoHistory` |
-| Disk space for history | automatic (half the free space, at most 50 GB) |
-| Always leave free on that disk | 5 GB |
-| Maximum steps per image | 100 |
-| Edit ▸ Undo steps back through the history | on (off = ImageJ's single undo) |
-| Redo with ⌘⌥Z / Ctrl+Alt+Z | on |
-| Redo also with ⌘⇧Z / Ctrl+Shift+Z | off |
+| Disk space for history | 33% of the free space on that disk |
+| Redo also with ⌘⇧Z / Ctrl+Shift+Z | on |
 | Start a new history when an image is saved | off |
-| Show the Undo History window when Fiji starts | off |
-| Also record: selections and overlays | on |
-| Also record: display (B&C, LUT) and calibration | on |
-| Also record: ROI Manager list | on |
-| Also record: Results table | on |
-| Closed images kept to reopen | 5 |
+| Record from the moment Fiji starts | on |
+| Show the Undo History window when Fiji starts | on |
 
-**Why redo is not ⌘⇧Z / Ctrl+Shift+Z by default.** ImageJ already uses that key to open *Image ▸ Color ▸ Channels Tool…*, and ⌘Y / Ctrl+Y (the usual redo on Windows) for *Edit ▸ Selection ▸ Properties…*. Turning on *Redo also with ⌘⇧Z* gives the key to *Edit ▸ Redo*: the Edit menu then shows it, and the Channels Tool opens from its menu (or from a shortcut you give it in *Plugins ▸ Shortcuts ▸ Add Shortcut…*). Turning the option off gives the key back to the Channels Tool. Changes made in the Channels Tool (mode, colours, ticked channels) are *Display* steps, so they are undone and redone like any other step.
+Everything is recorded while Undo History is on: pixels, selections, overlays, display, calibration, the ROI Manager list and the Results table. There is no limit on the number of steps; the memory and disk budgets are the only limits.
+
+**⌘⇧Z / Ctrl+Shift+Z.** ImageJ uses that key to open *Image ▸ Color ▸ Channels Tool…*; Undo History gives it to *Edit ▸ Redo*, and the Channels Tool still opens from its menu. If you prefer the old key, untick *Redo also with ⌘⇧Z* (⌘⌥Z / Ctrl+Alt+Z still redoes). Changes made in the Channels Tool (mode, colours, ticked channels) are *Display* steps, so they are undone and redone like any other step.
+
+**Start a new history when an image is saved.** Off: you can go back past a save, to the state the image had when it was opened. On: saving forgets the steps before it.
 
 ## Performance with big images
 
@@ -185,7 +190,7 @@ Measured with the test suite (Apple Silicon Mac, Java 21):
 
 Commands that **replace** an image by a new window with the same title (Make Composite, for example) are followed: the new window continues the old window's history. Undoing past that step brings the old kind of image back in its place.
 
-**Closed images.** The last 5 closed images keep their history (Options: *Closed images kept to reopen*), so *Reopen Closed Image* brings an image back with all its steps. Their memory is the first to be given back when the history needs room.
+**Closed images.** The last 5 images you closed keep their whole history, so *Edit ▸ Reopen Closed Image* brings an image back with all its steps. Their memory is the first to be given back when the history needs room, and a sixth closed image pushes out the oldest one.
 
 **Shared windows.** The ROI Manager and the Results table belong to no single image: a change to them becomes a step of the active image. Undo restores them only when they changed within that image's own history.
 
@@ -200,7 +205,7 @@ You need a Fiji installation; its bundled Java is used.
 ./bench.sh 1024 2048 4096               # size ladder in MB (needs RAM; HEAP=18g and PCT=20 are optional)
 ```
 
-`test.sh` checks 90 behaviours:
+`test.sh` checks 106 behaviours:
 
 - menu and macro commands
 - brush strokes
@@ -221,8 +226,11 @@ You need a Fiji installation; its bundled Java is used.
 - the ROI Manager list and the Results table as steps, restored by undo
 - closed images reopened with their history, and closed images giving their memory back first
 - Make Composite: the new window continues the history, and undo brings back the RGB image
+- no step limit (105 commands keep 105 steps)
+- memory full with the disk off: the disk is offered, and accepting records the refused change
+- Stop: every history forgotten, memory and spill folder freed, Undo and Ctrl+Shift+Z back to ImageJ; Start again, and the startup macro's option
 
-Tested with ImageJ 1.54p and Java 21 (Fiji 2.18) on macOS. The jar targets Java 8. Windows and Linux are expected to work but have not been tested yet. Reports are welcome.
+Tested with ImageJ 1.54p and Java 21 (Fiji 2.18) on macOS; the test suite also passes on Linux (ImageJ 1.54, Java 21). A user has tried it on Windows. The jar targets Java 8. Reports are welcome.
 
 ## License and credits
 
