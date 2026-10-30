@@ -16,7 +16,8 @@ public class Undo_History implements PlugIn {
 		if (arg == null) arg = "";
 		switch (arg) {
 			case "start": startRecording(); return;
-			case "stop": stopRecording(); return;
+			case "stop": forget(); return;
+			case "pause": Engine.get().pause(); IJ.showStatus("Undo History: paused"); return;
 			case "toggle":
 				if (Engine.isRunning()) stopRecording(); else startRecording();
 				return;
@@ -24,7 +25,8 @@ public class Undo_History implements PlugIn {
 			case "redo": case "back": case "keep": case "reopen": case "clear":
 				if (!Engine.isRunning()) {
 					IJ.beep();
-					IJ.showStatus("Undo History is stopped: Edit > Start/Stop Undo History starts it");
+					IJ.showStatus("Undo History is " + (Engine.isPaused() ? "paused" : "stopped")
+							+ ": Edit > Start/Stop Undo History " + (Engine.isPaused() ? "resumes" : "starts") + " it");
 					return;
 				}
 				break;
@@ -61,20 +63,37 @@ public class Undo_History implements PlugIn {
 	}
 
 	static void startRecording() {
+		boolean resuming = Engine.isPaused();
 		Engine.get().start();
-		IJ.showStatus("Undo History: recording");
+		IJ.showStatus("Undo History: " + (resuming ? "resumed" : "recording"));
 	}
 
-	/** Asks first when there is something to forget (not inside a macro). */
+	/**
+	 * Asks whether to pause (keep the history) or stop and forget it, when there is something to keep. The images
+	 * stay as they are either way. Inside a macro, stops without asking.
+	 */
 	static void stopRecording() {
 		Engine e = Engine.get();
 		int steps = e.recordedSteps();
-		if (steps > 0 && !IJ.macroRunning() && !IJ.showMessageWithCancel("Undo History",
-				"Stop Undo History?\n \n"
-				+ "The history (" + steps + " step" + (steps == 1 ? "" : "s") + ") is forgotten, and its memory and disk space are freed.\n"
-				+ "Edit > Undo goes back to ImageJ's single undo until you start it again."))
-			return;
-		e.stop();
+		if (steps == 0 || IJ.macroRunning()) { forget(); return; }
+		GenericDialog gd = new GenericDialog("Undo History");
+		gd.addMessage("Pause or stop Undo History?\n \n"
+				+ "Your images stay exactly as they are now: only the history is affected.\n \n"
+				+ "Pause: the history (" + steps + " step" + (steps == 1 ? "" : "s") + ") and its memory are kept. When you resume,\n"
+				+ "what changed in the meantime becomes one step, \"Changes while paused\".\n \n"
+				+ "Stop: the history is forgotten, and its memory and disk space are freed.\n \n"
+				+ "Either way, Edit > Undo is ImageJ's single undo until you resume or start again.");
+		gd.enableYesNoCancel("Pause", "Stop and forget");
+		gd.showDialog();
+		if (gd.wasCanceled()) return;
+		if (gd.wasOKed()) {
+			e.pause();
+			IJ.showStatus("Undo History: paused");
+		} else forget();
+	}
+
+	static void forget() {
+		Engine.get().stop();
 		IJ.showStatus("Undo History: stopped");
 	}
 
@@ -97,6 +116,9 @@ public class Undo_History implements PlugIn {
 		gd.addCheckbox("Start a new history when an image is saved", e.trimOnSave());
 		gd.addCheckbox("Record from the moment Fiji starts", Engine.startAtLaunch());
 		gd.addCheckbox("Show the Undo History window when Fiji starts", Engine.showAtStartup());
+		gd.addChoice("Macro button:", Macros.SAVE_MODES, Macros.SAVE_MODES[Macros.saveMode()]);
+		gd.addDirectoryField("Macro folder:", Macros.folder().getPath(), 28);
+		gd.addCheckbox("Open a new macro in the editor", Macros.openInEditor());
 		gd.addMessage("Recent steps stay in memory. With the disk on, older ones move to the disk folder\n"
 				+ "(use a fast SSD), and " + IJ.d2s(e.minFreeDiskGB(), 0) + " GB always stay free on that disk.\n"
 				+ "When there is no more room, the oldest steps are dropped. The opened state, saved states\n"
@@ -113,6 +135,10 @@ public class Undo_History implements PlugIn {
 		Prefs.set(Engine.PREF + "trimOnSave", gd.getNextBoolean());
 		Prefs.set(Engine.PREF + "startAtLaunch", gd.getNextBoolean());
 		Prefs.set(Engine.PREF + "showAtStartup", gd.getNextBoolean());
+		Prefs.set(Engine.PREF + "macroSave", gd.getNextChoiceIndex());
+		String macroFolder = gd.getNextString().trim();
+		Prefs.set(Engine.PREF + "macroFolder", macroFolder.equals(Macros.folder().getPath()) && Macros.folderPref().isEmpty() ? "" : macroFolder);
+		Prefs.set(Engine.PREF + "macroOpenEditor", gd.getNextBoolean());
 		Prefs.savePreferences();
 		e.settingsChanged();
 	}

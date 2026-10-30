@@ -16,6 +16,7 @@ import ij.gui.Toolbar;
 import ij.macro.Interpreter;
 
 import java.awt.AWTEvent;
+import java.awt.Color;
 import java.awt.EventQueue;
 import java.awt.Frame;
 import java.awt.KeyEventDispatcher;
@@ -194,32 +195,56 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	private final CopyOnWriteArrayList<Runnable> changeListeners = new CopyOnWriteArrayList<>();
 	private volatile String lastCommand;
 	private volatile boolean mouseDown;
-	private volatile boolean running;
+	private volatile boolean running, paused;
 	private Thread ticker;
 
 	private Engine() {}
 
 	// ---- lifecycle ------------------------------------------------------
 
+	/** Starts recording, or resumes after a pause: then each image's changes made while paused become one step. */
 	synchronized void start() {
 		if (running) return;
+		boolean resuming = paused;
 		running = true;
+		paused = false;
 		applySettings();
 		Executer.addCommandListener(this);
 		ImagePlus.addImageListener(this);
 		Roi.addRoiListener(this);
-		int[] ids = WindowManager.getIDList();
-		if (ids != null) {
-			lock.lock();
-			try {
+		Recording.ensure();
+		Recording.skip();
+		lock.lock();
+		try {
+			if (resuming) {
+				for (History h : new ArrayList<>(histories.values())) {
+					h.threads.clear();
+					if (h.imp.getWindow() == null) { // closed while paused
+						histories.remove(h.imp.getID());
+						h.closedAt = System.currentTimeMillis();
+						pendingClose.add(h);
+						continue;
+					}
+					h.dirty = true;
+					h.metaOnly = false;
+					h.nonToolUpdate = true;
+					h.pendingCommand = null;
+					h.pendingCode = null;
+					h.pendingTool = "Changes while paused";
+					flush(h); // no step when nothing changed
+					h.lastChanges = h.imp.changes;
+				}
+				processCloses();
+			}
+			int[] ids = WindowManager.getIDList();
+			if (ids != null)
 				for (int id : ids) {
 					ImagePlus imp = WindowManager.getImage(id);
 					if (imp != null && imp.getWindow() != null)
 						register(imp, "Tracking started");
 				}
-			} finally { lock.unlock(); }
-		}
-		Toolkit.getDefaultToolkit().addAWTEventListener(mouseWatcher, AWTEvent.MOUSE_EVENT_MASK);
+		} finally { lock.unlock(); }
+		Toolkit.getDefaultToolkit().addAWTEventListener(mouseWatcher, AWTEvent.MOUSE_EVENT_MASK | AWTEvent.MOUSE_MOTION_EVENT_MASK);
 		KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(redoKeys);
 		applyShiftZ(redoShiftZ());
 		lastRmQuick = quickRm();
@@ -235,23 +260,8 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	 * and Edit ▸ Undo and Cmd/Ctrl+Shift+Z go back to ImageJ.
 	 */
 	void stop() {
-		Thread t;
-		synchronized (this) {
-			if (!running) return;
-			running = false;
-			Executer.removeCommandListener(this);
-			ImagePlus.removeImageListener(this);
-			Roi.removeRoiListener(this);
-			Toolkit.getDefaultToolkit().removeAWTEventListener(mouseWatcher);
-			KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(redoKeys);
-			applyShiftZ(false);
-			t = ticker;
-			ticker = null;
-		}
-		if (t != null) {
-			t.interrupt();
-			try { t.join(2000); } catch (InterruptedException ignored) { }
-		}
+		if (!detach() && !paused) return;
+		paused = false;
 		lock.lock();
 		try {
 			pendingOpen.clear();
@@ -268,6 +278,47 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		fireChanged();
 	}
 
+	/**
+	 * Pauses recording: the histories are kept (with their memory), nothing is recorded, and Edit ▸ Undo is ImageJ's
+	 * single undo until {@link #start()} resumes.
+	 */
+	void pause() {
+		if (!detach()) return;
+		lock.lock();
+		try {
+			for (History h : histories.values()) flush(h); // what was done just before the pause is its own step
+		} finally { lock.unlock(); }
+		paused = true;
+		fireChanged();
+	}
+
+	static synchronized boolean isPaused() {
+		return instance != null && instance.paused;
+	}
+
+	/** Removes every listener and stops the ticker. Returns false if it was not running. */
+	private boolean detach() {
+		Thread t;
+		synchronized (this) {
+			if (!running) return false;
+			running = false;
+			Executer.removeCommandListener(this);
+			ImagePlus.removeImageListener(this);
+			Roi.removeRoiListener(this);
+			Toolkit.getDefaultToolkit().removeAWTEventListener(mouseWatcher);
+			KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(redoKeys);
+			applyShiftZ(false);
+			Recording.stop();
+			t = ticker;
+			ticker = null;
+		}
+		if (t != null) {
+			t.interrupt();
+			try { t.join(2000); } catch (InterruptedException ignored) { }
+		}
+		return true;
+	}
+
 	/** Steps that stopping would forget: those after the opened state of each image, and closed images. */
 	int recordedSteps() {
 		lock.lock();
@@ -278,15 +329,31 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		} finally { lock.unlock(); }
 	}
 
+	/** The stroke being painted (brush, pencil, flood fill), written as macro code when the mouse is released. */
+	private volatile Stroke stroke;
+
 	private final AWTEventListener mouseWatcher = e -> {
 		if (e.getID() == MouseEvent.MOUSE_PRESSED) {
 			mouseDown = true;
-			if (e.getSource() instanceof ImageCanvas)
-				commitBeforeStroke(((ImageCanvas) e.getSource()).getImage());
+			if (e.getSource() instanceof ImageCanvas) {
+				ImageCanvas c = (ImageCanvas) e.getSource();
+				commitBeforeStroke(c.getImage());
+				stroke = Stroke.begin(Toolbar.getToolName(), c, (MouseEvent) e);
+			}
+		} else if (e.getID() == MouseEvent.MOUSE_DRAGGED) {
+			Stroke st = stroke;
+			if (st != null && e.getSource() == st.canvas) st.add((MouseEvent) e);
 		} else if (e.getID() == MouseEvent.MOUSE_RELEASED) {
 			mouseDown = false;
-			// a tool may have edited the overlay or the selection without touching the pixels
-			if (e.getSource() instanceof ImageCanvas) metaChanged(((ImageCanvas) e.getSource()).getImage(), null);
+			Stroke st = stroke;
+			stroke = null;
+			if (e.getSource() instanceof ImageCanvas) {
+				ImagePlus imp = ((ImageCanvas) e.getSource()).getImage();
+				History h = imp == null ? null : histories.get(imp.getID());
+				if (st != null && h != null) h.addStroke(st.code(), st.approximate);
+				// a tool may have edited the overlay or the selection without touching the pixels
+				metaChanged(imp, null);
+			}
 		}
 	};
 
@@ -397,7 +464,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	}
 
 	public String commandExecuting(String cmd) {
-		if (!running || cmd == null) return cmd;
+		if (!running || cmd == null || Thread.currentThread() == replayThread) return cmd;
 		if (cmd.equals("Undo")) {
 			ImagePlus imp = WindowManager.getCurrentImage();
 			if (imp != null && !histories.containsKey(imp.getID())) {
@@ -419,6 +486,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			return cmd; // nothing of ours to undo: let ImageJ undo selections etc.
 		}
 		if (isOwnCommand(cmd)) return cmd;
+		if (cmd.equals("Record...")) { Recording.handOver(); return cmd; }
 		lastCommand = cmd;
 		ImagePlus imp = WindowManager.getCurrentImage();
 		if (imp != null && imp.getWindow() != null && !histories.containsKey(imp.getID())) {
@@ -446,6 +514,9 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 				} finally { lock.unlock(); }
 			}
 			h.pendingCommand = cmd;
+			// a macro's run("...", "options"): ImageJ's Recorder does not see its values, the options string has them
+			String opts = ij.Macro.getOptions();
+			h.pendingCode = opts != null ? Recording.runLine(cmd, opts) : null;
 			h.pendingTool = null;
 			h.dirty = true;
 			h.metaOnly = false;
@@ -463,7 +534,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 
 	static boolean isOwnCommand(String cmd) {
 		return cmd.startsWith("Undo History") || cmd.equals("Redo") || cmd.startsWith("Keep This State")
-				|| cmd.startsWith("Clear History") || cmd.equals("Start Undo History") || cmd.equals("Stop Undo History")
+				|| cmd.startsWith("Clear History") || cmd.equals("Start Undo History") || cmd.equals("Stop Undo History") || cmd.equals("Pause Undo History")
 				|| cmd.equals("Start/Stop Undo History");
 	}
 
@@ -483,6 +554,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	}
 
 	private void tick() {
+		if (ij.plugin.frame.Recorder.getInstance() == null) Recording.ensure(); // the user closed their Recorder
 		synchronized (commandThreads) {
 			commandThreads.removeIf(t -> !t.isAlive());
 		}
@@ -737,16 +809,25 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		}
 		lastCaptureMs = (System.nanoTime() - t0) / 1e6;
 		boolean fromCommand = h.pendingCommand != null;
+		String command = h.pendingCommand, macroCode = h.pendingCode;
 		String label = h.pendingCommand != null ? pretty(h.pendingCommand)
 				: h.pendingTool != null ? h.pendingTool : "Edit";
 		h.pendingCommand = null;
 		h.pendingTool = null;
-		if (s == null) { noChangeCaptures++; return; }
+		h.pendingCode = null;
+		if (s == null) {
+			// nothing changed on this image (e.g. Duplicate...): what was recorded is no step's, of this image or another
+			Recording.skip();
+			noChangeCaptures++;
+			return;
+		}
 		if (s.metaOnly && !fromCommand) {
 			// no pixels changed and no command ran: name the step after what changed
 			String what = s.metaChange(cur.snap);
 			if (what != null) label = what;
 		}
+		boolean approximate = h.strokesApproximate();
+		String code = stepCode(h, command, macroCode, s, label);
 		while (h.states.size() > h.cursor + 1)
 			release(h.states.remove(h.states.size() - 1).snap);
 		if (s.metaOnly && (label.equals("Selection") || label.equals("Display")) && h.cursor > 0
@@ -755,12 +836,15 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			retain(s, System.currentTimeMillis());
 			release(cur.snap);
 			State st = new State(label, s);
+			st.code = code;
 			st.clean = cur.clean && !imp.changes;
 			h.states.set(h.cursor, st);
 			fireChanged();
 			return;
 		}
 		State st = new State(label, s);
+		st.code = code;
+		st.approximate = approximate;
 		// a selection, display or ROI Manager change leaves the image as saved, as in ImageJ (no "Save changes?")
 		if (s.metaOnly) st.clean = cur.clean && !imp.changes;
 		h.states.add(st);
@@ -768,6 +852,30 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		retain(s, st.time);
 		fireChanged();
 	}
+
+	/**
+	 * The macro code that repeats a step: what ImageJ's Recorder wrote (a menu command with its dialog's values, a
+	 * selection...), or the macro's own run() line, then the paint strokes. A display change with no code becomes
+	 * setMinAndMax.
+	 */
+	private String stepCode(History h, String command, String macroCode, Snapshot s, String label) {
+		String rec = Recording.take();
+		StringBuilder b = new StringBuilder();
+		if (macroCode != null) {
+			for (String l : rec.split("\n"))
+				if (!l.isEmpty() && !command.equals(Recording.commandOf(l))) b.append(l).append('\n');
+			b.append(macroCode);
+		} else b.append(rec);
+		b.append(h.takeStrokes());
+		if (b.length() == 0 && s.metaOnly && "Display".equals(label)) {
+			ImagePlus imp = h.imp;
+			b.append("setMinAndMax(").append(num(imp.getDisplayRangeMin())).append(", ")
+					.append(num(imp.getDisplayRangeMax())).append(");\n");
+		}
+		return b.toString();
+	}
+
+	private static String num(double v) { return IJ.d2s(v, v == Math.rint(v) ? 0 : 4); }
 
 	private void goTo(History h, int k) {
 		if (k < 0 || k >= h.states.size()) return;
@@ -804,6 +912,9 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		h.problem = null;
 		h.pendingCommand = null;
 		h.pendingTool = null;
+		h.pendingCode = null;
+		h.takeStrokes();
+		Recording.skip(); // what was recorded before the jump belongs to no step
 		Undo.reset();
 		imp.changes = !s.clean;
 		h.lastChanges = imp.changes;
@@ -994,6 +1105,156 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		fireChanged();
 	}
 
+	/** The thread replaying steps after a deletion: its commands are not recorded as new steps. */
+	private volatile Thread replayThread;
+
+	/** What deleting steps involves: the later steps to run again, and those that cannot be run again exactly. */
+	static final class DeletePlan {
+		final int[] steps;
+		final List<String> notExact = new ArrayList<>();
+		int replays;
+		DeletePlan(int[] steps) { this.steps = steps; }
+	}
+
+	/** Checks a deletion: the steps (never the opened state), and which kept later steps would be run again. */
+	DeletePlan planDelete(int imageID, int[] ks) {
+		History h = histories.get(imageID);
+		if (h == null) return null;
+		lock.lock();
+		try {
+			flush(h);
+			java.util.TreeSet<Integer> set = new java.util.TreeSet<>();
+			for (int k : ks) if (k > 0 && k < h.states.size()) set.add(k);
+			if (set.isEmpty()) return null;
+			int[] steps = new int[set.size()];
+			int n = 0;
+			for (int k : set) steps[n++] = k;
+			DeletePlan p = new DeletePlan(steps);
+			for (int i = steps[0] + 1; i < h.states.size(); i++) {
+				if (set.contains(i)) continue;
+				State st = h.states.get(i);
+				p.replays++;
+				if (st.code.isEmpty()) p.notExact.add(i + ". " + st.label + " (no macro code)");
+				else if (st.approximate) p.notExact.add(i + ". " + st.label + " (repeated only roughly)");
+			}
+			return p;
+		} finally { lock.unlock(); }
+	}
+
+	/**
+	 * Deletes steps and removes their effect: the image goes back to the step before the first one deleted, and each
+	 * later step that is kept runs again from its macro code, becoming a new step. With {@code forgetOnly}, the steps
+	 * are only forgotten (memory freed, their effect stays in the later steps); a deleted current step is undone.
+	 * Returns an error message, or null. Must not run on the event thread.
+	 */
+	String deleteSteps(int imageID, DeletePlan plan, boolean forgetOnly) {
+		History h = histories.get(imageID);
+		if (h == null || plan == null) return null;
+		lock.lock();
+		try {
+			flush(h);
+			for (int k : plan.steps) if (k >= h.states.size()) return "the history changed: nothing was deleted";
+			if (forgetOnly || plan.replays == 0) {
+				java.util.Set<Integer> del = new java.util.HashSet<>();
+				for (int k : plan.steps) del.add(k);
+				if (del.contains(h.cursor)) {
+					int back = h.cursor;
+					while (del.contains(back)) back--;
+					goTo(h, back);
+				}
+				for (int i = plan.steps.length - 1; i >= 0; i--) {
+					int k = plan.steps[i];
+					release(h.states.remove(k).snap);
+					if (k < h.cursor) h.cursor--;
+				}
+				fireChanged();
+				return null;
+			}
+			return replay(h, plan);
+		} finally { lock.unlock(); }
+	}
+
+	private String replay(History h, DeletePlan plan) {
+		java.util.Set<Integer> del = new java.util.HashSet<>();
+		for (int k : plan.steps) del.add(k);
+		int first = plan.steps[0], base = first - 1, oldCursor = h.cursor;
+		List<State> tail = new ArrayList<>(h.states.subList(first, h.states.size()));
+		// where the image should end: the replayed counterpart of the current step
+		int target = oldCursor < first ? oldCursor : base;
+		for (int i = first; i <= oldCursor; i++) if (!del.contains(i)) target++;
+		goTo(h, base);
+		ImagePlus imp = h.imp;
+		Color fg = Toolbar.getForegroundColor(), bg = Toolbar.getBackgroundColor();
+		int lineWidth = ij.gui.Line.getWidth();
+		String error = null;
+		int added = 0;
+		h.states.subList(first, h.states.size()).clear();
+		h.restoring = true;
+		h.restoreSettled = false;
+		try {
+			for (int i = 0; i < tail.size() && error == null; i++) {
+				if (del.contains(first + i)) continue;
+				State old = tail.get(i);
+				if (!runAgain(imp, old.code)) { error = "step \"" + old.label + "\" could not run again"; break; }
+				State cur = h.states.get(h.cursor);
+				try {
+					Snapshot s = Snapshot.capture(imp, cur.snap, store, System.currentTimeMillis(), null);
+					if (s == null) s = Snapshot.same(imp, cur.snap);
+					State st = new State(old.label, s);
+					st.code = old.code;
+					st.approximate = old.approximate;
+					st.pinned = old.pinned;
+					h.states.add(st);
+					h.cursor = h.states.size() - 1;
+					retain(s, st.time);
+					added++;
+				} catch (Store.NoRoomException e) {
+					error = "no room to record step \"" + old.label + "\": " + e.getMessage();
+				}
+			}
+		} finally {
+			Toolbar.setForegroundColor(fg);
+			Toolbar.setBackgroundColor(bg);
+			ij.gui.Line.setWidth(lineWidth);
+			h.restoring = false;
+			EventQueue.invokeLater(() -> h.restoreSettled = true);
+			Recording.skip();
+		}
+		if (error != null) {
+			// put everything back as it was
+			goTo(h, base);
+			while (h.states.size() > first) release(h.states.remove(h.states.size() - 1).snap);
+			h.states.addAll(tail);
+			goTo(h, oldCursor);
+			fireChanged();
+			return error + ". Nothing was deleted.";
+		}
+		for (State old : tail) release(old.snap);
+		if (target != h.cursor) goTo(h, Math.min(target, h.states.size() - 1));
+		h.imp.changes = true;
+		h.lastChanges = true;
+		fireChanged();
+		return null;
+	}
+
+	/**
+	 * Runs a step's macro code on the image, in a thread named like a macro's ("Run$_"), which ImageJ's Recorder
+	 * does not record. Returns false if the macro was aborted.
+	 */
+	private boolean runAgain(ImagePlus imp, String code) {
+		final String[] result = new String[1];
+		Thread t = new Thread(() -> {
+			WindowManager.setTempCurrentImage(imp);
+			try { result[0] = IJ.runMacro(code); }
+			finally { WindowManager.setTempCurrentImage(null); }
+		}, "Run$_UndoHistory-replay");
+		replayThread = t;
+		t.start();
+		try { t.join(); } catch (InterruptedException e) { return false; }
+		finally { replayThread = null; }
+		return !"[aborted]".equals(result[0]);
+	}
+
 	void clear(int imageID) {
 		History h = histories.get(imageID);
 		if (h == null) return;
@@ -1026,6 +1287,47 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		} finally { lock.unlock(); }
 	}
 
+	/**
+	 * A macro that repeats the chosen steps (indexes in the history; none = every step up to the current one) on the
+	 * active image, or null when the image has no history.
+	 */
+	String macroOf(int imageID, int[] ks) {
+		History h = histories.get(imageID);
+		if (h == null) return null;
+		lock.lock();
+		try {
+			flush(h);
+			List<Integer> chosen = new ArrayList<>();
+			if (ks == null || ks.length == 0) for (int i = 1; i <= h.cursor; i++) chosen.add(i);
+			else for (int k : ks) if (k > 0 && k < h.states.size()) chosen.add(k);
+			Collections.sort(chosen);
+			StringBuilder b = new StringBuilder();
+			b.append("// Made by Undo History from \"").append(h.imp.getTitle()).append("\", ")
+					.append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm").format(new java.util.Date())).append('\n')
+					.append("// Steps: ").append(chosen.isEmpty() ? "none" : describe(chosen)).append(". Runs on the active image.\n");
+			for (int k : chosen) {
+				State st = h.states.get(k);
+				b.append("\n// ").append(k).append(". ").append(st.label).append('\n');
+				if (st.code.isEmpty()) b.append("// (this step has no macro code: it was not made by a command Undo History could record)\n");
+				else b.append(st.code);
+			}
+			return b.toString();
+		} finally { lock.unlock(); }
+	}
+
+	/** "1-3, 5" */
+	static String describe(List<Integer> ks) {
+		StringBuilder b = new StringBuilder();
+		for (int i = 0; i < ks.size(); ) {
+			int j = i;
+			while (j + 1 < ks.size() && ks.get(j + 1) == ks.get(j) + 1) j++;
+			if (b.length() > 0) b.append(", ");
+			b.append(ks.get(i)).append(j > i ? "-" + ks.get(j) : "");
+			i = j + 1;
+		}
+		return b.toString();
+	}
+
 	void settingsChanged() {
 		if (running) applyShiftZ(redoShiftZ());
 		lock.lock();
@@ -1045,10 +1347,11 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	// ---- read-only view for the window (no locking) ---------------------
 
 	static final class Row {
-		final String label, time;
+		final String label, time, code;
 		final boolean current, future, pinned, saved, clean;
 		Row(State s, boolean current, boolean future) {
 			label = s.label;
+			code = s.code;
 			time = s.timeString();
 			this.current = current;
 			this.future = future;
@@ -1194,6 +1497,9 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		final long time = System.currentTimeMillis();
 		final Snapshot snap;
 		boolean pinned, saved, clean;
+		/** The macro code that repeats this step ("" when there is none), and whether it repeats it only roughly. */
+		String code = "";
+		boolean approximate;
 		State(String label, Snapshot snap) { this.label = label; this.snap = snap; }
 		String timeString() {
 			return new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date(time));
@@ -1223,6 +1529,21 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		volatile String pendingCommand, pendingTool;
 		/** The name of the change that could not be recorded for lack of room. */
 		volatile String refusedLabel;
+		/** A macro's run() line for the pending command. */
+		volatile String pendingCode;
+		private final StringBuilder strokes = new StringBuilder();
+		private boolean strokesApproximate;
+		synchronized void addStroke(String code, boolean approximate) {
+			strokes.append(code);
+			strokesApproximate |= approximate;
+		}
+		synchronized boolean strokesApproximate() { return strokesApproximate; }
+		synchronized String takeStrokes() {
+			String c = strokes.toString();
+			strokes.setLength(0);
+			strokesApproximate = false;
+			return c;
+		}
 		boolean lastChanges;
 		History(ImagePlus imp) { this.imp = imp; this.title = imp.getTitle(); }
 	}

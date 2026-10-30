@@ -32,10 +32,12 @@ ImageJ 1.x, the engine underneath Fiji, keeps one undo buffer. Undo reverts only
 |---|---|
 | **Undo as far back as you need** | **⌘Z** / **Ctrl+Z** steps back again and again; **⌘⇧Z** / **Ctrl+Shift+Z** (or **⌘⌥Z** / **Ctrl+Alt+Z**) steps forward |
 | **A panel with every step** | click any step to go back to it; copy a step as a new image to compare before and after |
+| **Steps become a macro** | each step keeps the macro code that repeats it, values included; **Macro** saves the steps as an `.ijm` file that runs on any image |
+| **Delete a step, not just undo it** | select a step in the middle and press **Delete**: its effect is removed and the later steps run again |
 | **More than pixels** | selections, overlays, display range and LUTs, calibration, the ROI Manager list and the Results table are steps too |
 | **Closed by mistake?** | *Edit ▸ Reopen Closed Image* brings an image back with its whole history |
 | **Light on memory** | a step that changes no pixels shares the planes of the step before; when the memory budget is full, older steps can move to disk (off until you turn it on) |
-| **On when you want it** | *Start/Stop* in the window or the Edit menu; stopping forgets the history and frees its memory and disk space |
+| **On when you want it** | *Start/Stop* in the window or the Edit menu: pause (the history is kept) or stop (it is forgotten, its memory and disk space freed) |
 | **Works with macros** | each `run("…")` call in a macro is one step |
 
 ## Install
@@ -74,14 +76,21 @@ All three are written in Java 8 for any system Fiji runs on, and their shortcuts
 | Step back | **Edit ▸ Undo**, **⌘Z** on macOS, **Ctrl+Z** on Windows/Linux. Each press goes back one step |
 | Step forward (redo) | **⌘⇧Z** / **Ctrl+Shift+Z**, **⌘⌥Z** / **Ctrl+Alt+Z**, or **Edit ▸ Redo** |
 | See every step, jump to any of them | **Edit ▸ Undo History…** and click a row |
-| Open a step as a new image (compare before/after) | Select the row, then **Copy** |
-| Never drop a step when space runs out | Select the row, then **Keep** |
-| Forget the steps of one image | **Clear** |
+| Select steps without moving the image | **⌘**-click / **Ctrl**-click, or **Shift**-click for a range; **Esc** unselects |
+| Open steps as new images (compare before/after) | **Copy** (the selected steps, or the current one) |
+| Never drop a step when space runs out | **Keep** (the selected steps, or the current one) |
+| Delete steps and their effect | select them, then **Delete** (the button or the Delete key); with nothing selected, the Delete key deletes the current step |
+| Forget the steps of one image, keeping the image as it is | **Clear** (with nothing selected) |
+| Make a macro of the steps | **Macro** (the selected steps, or every step up to the current one) |
 | Bring back an image you closed, with its history | **Edit ▸ Reopen Closed Image** |
-| Stop recording (forget every history, free its memory and disk), or start again | **Start/Stop** at the top of the window, or **Edit ▸ Start/Stop Undo History** |
+| Pause, stop (forget every history, free its memory and disk), resume or start again | **Stop / Resume / Start** at the top of the window, or **Edit ▸ Start/Stop Undo History** |
 | Settings | **Options…**, or **Edit ▸ Undo History Options…** |
 
-Undo History starts with Fiji and shows its window; both can be turned off in the [Options](#options). While it is stopped, Edit ▸ Undo is ImageJ's own single undo and **⌘⇧Z** / **Ctrl+Shift+Z** opens the Channels Tool again.
+Undo History starts with Fiji and shows its window; both can be turned off in the [Options](#options).
+
+**Stop** asks whether to pause or to stop. Your images stay exactly as they are either way: only the history is affected. *Pause* keeps the history and its memory; when you resume, whatever changed in the meantime becomes one step, *Changes while paused*, so undo can still go back past it. *Stop and forget* drops the history and frees its memory and disk space. While paused or stopped, Edit ▸ Undo is ImageJ's own single undo and **⌘⇧Z** / **Ctrl+Shift+Z** opens the Channels Tool again.
+
+**Keep** marks a step as one that is never dropped: when memory and disk are full, the oldest steps go first, but never the opened state, saved states and kept steps.
 
 On Windows and Linux the AltGr key is reported as Ctrl+Alt, and on some keyboards AltGr+Z types a letter (ż in Polish). While a text field has the focus, Ctrl+Alt+Z is therefore left to the field: click the image first, or use **Edit ▸ Redo**.
 
@@ -98,6 +107,40 @@ In the window, `▶` marks the current state, and grey italic rows are steps you
 After File ▸ Save, the current step is marked **[saved]**. Going back to the opened or the saved state clears the "unsaved changes" flag.
 
 ImageJ's own undo still handles what the history does not cover, such as a selection change on an unedited image, or a paste that is still floating.
+
+## Macros from the history
+
+Each step keeps the macro code that repeats it. Hover a step in the window to see it.
+
+- **A menu command** gets exactly the line ImageJ's Macro Recorder would write, with the values typed in its dialog: `run("Gaussian Blur...", "sigma=2");`. Undo History keeps ImageJ's Recorder running out of sight for this, because ImageJ's dialogs report their values only while a Recorder is running. If you open *Plugins ▸ Macros ▸ Record…*, your Recorder takes over and is read instead.
+- **A macro's `run()` call** keeps the macro's own line, values included.
+- **A selection** drawn with a tool: `makeRectangle(…)`, `makeOval(…)` and the like, as the Recorder writes them. ROI Manager actions and Measure are recorded too.
+- **A display change** with no command: `setMinAndMax(…)`.
+- **A brush or pencil stroke**: ImageJ records none, so Undo History draws a line of the brush's width along the mouse path. This is close to the stroke, but not identical, and the step is marked as approximate.
+- **A flood fill**: `floodFill(x, y)`, exact.
+- Steps with no code: *Changes while paused*, and edits made by a plugin without a menu command.
+
+**Macro** writes the selected steps (or every step up to the current one) as an `.ijm` file that runs on the active image. Where it goes is set in the Options:
+
+| Macro button | What happens |
+|---|---|
+| Save in the macro folder (default) | saved at once in the macro folder (`Fiji.app/macros/Undo History/` unless you choose another) |
+| Ask, starting in the macro folder | a Save dialog opens in the macro folder |
+| Ask, starting in the image's folder | a Save dialog opens where the image was opened from |
+| Ask, starting in the last folder used | a Save dialog opens where the last macro went |
+| Export | a Save dialog opens in the image's folder; the file is only exported |
+
+Except for an export, the macro then opens in the editor (an option), and, when [Side Toolbar](https://github.com/AIHector/Fiji-Side-Toolbar) is installed, gets a button in the macro section of its bar.
+
+## Delete a step
+
+Each step stores the image as it was, together with the code that produced it. **Delete** uses both:
+
+- **Deleting the current step** works like Undo, and the step is discarded.
+- **Deleting an earlier step** removes its effect: the image goes back to the step before it, and each later step runs again from its macro code, becoming a new step. Select several steps to delete them together. If you delete a Crop, the later filters now run on the whole image.
+- **When a later step cannot run again exactly** (it has no code, or a brush stroke that is only approximate), Undo History lists those steps and offers *Forget only*: the deleted steps' memory is freed, but their effect stays in the later steps. For approximate steps alone, it also offers to run them again anyway.
+- If a step fails to run again, everything is put back as it was.
+- The opened state cannot be deleted. Deleting cannot be undone.
 
 ## How it stores the history: memory first, then disk
 
@@ -130,6 +173,9 @@ The footer of the window shows how much memory and disk the history is using.
 | Start a new history when an image is saved | off |
 | Record from the moment Fiji starts | on |
 | Show the Undo History window when Fiji starts | on |
+| Macro button | Save in the macro folder |
+| Macro folder | `Fiji.app/macros/Undo History/` |
+| Open a new macro in the editor | on |
 
 Everything is recorded while Undo History is on: pixels, selections, overlays, display, calibration, the ROI Manager list and the Results table. There is no limit on the number of steps; the memory and disk budgets are the only limits.
 
@@ -205,7 +251,7 @@ You need a Fiji installation; its bundled Java is used.
 ./bench.sh 1024 2048 4096               # size ladder in MB (needs RAM; HEAP=18g and PCT=20 are optional)
 ```
 
-`test.sh` checks 106 behaviours:
+`test.sh` checks 133 behaviours:
 
 - menu and macro commands
 - brush strokes
@@ -229,8 +275,13 @@ You need a Fiji installation; its bundled Java is used.
 - no step limit (105 commands keep 105 steps)
 - memory full with the disk off: the disk is offered, and accepting records the refused change
 - Stop: every history forgotten, memory and spill folder freed, Undo and Ctrl+Shift+Z back to ImageJ; Start again, and the startup macro's option
+- each step's macro code: menu commands, macro commands with their values, display changes, brush strokes; a command that changes nothing (Duplicate) leaves no code behind
+- Create Macro: the file is saved, and running it on the opened image gives the same pixels
+- Delete: an earlier step's effect is removed by running the later steps again (pixels checked); the current step; *Forget only*
+- Pause and Resume: *Changes while paused*, undo back past it
+- Plugins ▸ Macros ▸ Record…: the user's Recorder takes over and is read, the hidden one comes back when it closes
 
-Tested with ImageJ 1.54p and Java 21 (Fiji 2.18) on macOS; the test suite also passes on Linux (ImageJ 1.54, Java 21). A user has tried it on Windows. The jar targets Java 8. Reports are welcome.
+Tested with ImageJ 1.54p and Java 21 (Fiji 2.18) on macOS; the test suite also passes on Linux (ImageJ 1.54f, Java 21). A user has tried it on Windows. The jar targets Java 8. Reports are welcome.
 
 ## License and credits
 
