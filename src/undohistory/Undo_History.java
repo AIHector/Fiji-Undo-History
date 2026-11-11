@@ -14,7 +14,9 @@ public class Undo_History implements PlugIn {
 
 	public void run(String arg) {
 		Engine engine = Engine.get();
+		boolean wasRunning = Engine.isRunning();
 		engine.start();
+		if (!wasRunning) RecordingControl.start();
 		if (arg == null) arg = "";
 		switch (arg) {
 			case "start":

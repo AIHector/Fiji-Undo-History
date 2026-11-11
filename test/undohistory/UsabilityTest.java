@@ -50,7 +50,7 @@ public final class UsabilityTest {
             Thread.sleep(500);
             check(engine.cursorOf(imp.getID()) == 1, "Go to restores selected row");
             EventQueue.invokeAndWait(() -> list.setSelectionInterval(1, 2));
-            check(macro.isEnabled() && !copy.isEnabled() && !delete.isEnabled(), "multi-selection enables export and disables single-row actions");
+            check(macro.isEnabled() && !copy.isEnabled() && delete.isEnabled(), "multi-selection enables batch delete and export while disabling single-image actions");
             Thread.sleep(500);
             check(list.getSelectedIndices().length == 2, "selection survives timer refresh");
             EventQueue.invokeAndWait(macro::doClick);

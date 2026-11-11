@@ -700,7 +700,8 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		while (h.states.size() > h.cursor + 1)
 			release(h.states.remove(h.states.size() - 1).snap);
 		if (s.metaOnly && (label.equals("Selection") || label.equals("Display")) && h.cursor > 0
-				&& cur.snap.metaOnly && cur.label.equals(label) && !cur.pinned && !cur.saved) {
+				&& cur.snap.metaOnly && cur.label.equals(label) && !cur.pinned && !cur.saved
+				&& cur.label.equals(cur.originalLabel) && cur.note.isEmpty() && cur.included) {
 			// a run of selection (or display) changes is one step: the latest replaces the previous one
 			retain(s, System.currentTimeMillis());
 			release(cur.snap);
@@ -907,7 +908,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		lock.lock();
 		try {
 			if (k == 0 && k < h.states.size()) return; // the first state always stays
-			if (k >= 0 && k < h.states.size()) h.states.get(k).pinned ^= true;
+			if (k >= 0 && k < h.states.size() && !h.states.get(k).saved) h.states.get(k).pinned ^= true;
 		} finally { lock.unlock(); }
 		fireChanged();
 	}
@@ -941,16 +942,140 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			if (h == null) return false;
 			flush(h);
 			if (k <= 0 || k >= h.states.size()) return false;
-			State selected = h.states.get(k);
-			if (k == h.cursor) goTo(h, k - 1);
-			// A cancelled or failed restore must leave both the image and its history intact.
-			if (h.cursor == k || k >= h.states.size() || h.states.get(k) != selected) return false;
-			release(h.states.remove(k).snap);
-			if (k < h.cursor) h.cursor--;
-			h.dropped++;
-			fireChanged();
-			return true;
+			return deleteMany(imageID, new long[] {h.states.get(k).key}) > 0;
 		} finally { lock.unlock(); }
+	}
+
+	/** Resolve the entire selection before making changes; the baseline is never removed. */
+	private List<State> selected(History h, long[] keys) {
+		if (keys == null || keys.length == 0) throw new IllegalArgumentException("Select one or more steps first.");
+		java.util.Set<Long> wanted = new java.util.HashSet<>();
+		for (long key : keys) wanted.add(key);
+		List<State> result = new ArrayList<>();
+		for (State state : h.states) if (wanted.remove(state.key)) result.add(state);
+		if (!wanted.isEmpty()) throw new IllegalArgumentException("Some selected steps are no longer available. Select them again.");
+		return result;
+	}
+
+	static final class DeletionPlan {
+		final long[] keys;
+		final int count, checkpoints;
+		final long cursorKey;
+		final boolean current;
+		DeletionPlan(List<State> states, State baseline, State active) {
+			List<Long> deletable = new ArrayList<>(); int kept = 0; boolean includes = false;
+			for (State state : states) if (state != baseline) {
+				deletable.add(state.key); if (state.pinned || state.saved) kept++; if (state == active) includes = true;
+			}
+			cursorKey = active.key;
+			keys = new long[deletable.size()]; for (int i = 0; i < keys.length; i++) keys[i] = deletable.get(i);
+			count = keys.length; checkpoints = kept; current = includes;
+		}
+	}
+
+	DeletionPlan planDeletion(int imageID, long[] keys) {
+		lock.lock();
+		try {
+			History h = requireHistory(imageID); flush(h);
+			return new DeletionPlan(selected(h, keys), h.states.get(0), h.states.get(h.cursor));
+		} finally { lock.unlock(); }
+	}
+
+	int deletePlanned(int imageID, DeletionPlan plan) {
+		lock.lock();
+		try {
+			History h = requireHistory(imageID); flush(h);
+			if (h.states.get(h.cursor).key != plan.cursorKey)
+				throw new IllegalArgumentException("The current history state changed while deletion was being confirmed. Select the steps again.");
+			DeletionPlan latest = new DeletionPlan(selected(h, plan.keys), h.states.get(0), h.states.get(h.cursor));
+			if (latest.checkpoints != plan.checkpoints)
+				throw new IllegalArgumentException("Checkpoint protection changed. Review the deletion again.");
+			return deleteMany(imageID, plan.keys);
+		} finally { lock.unlock(); }
+	}
+
+	int deleteMany(int imageID, long[] keys) {
+		lock.lock();
+		try {
+			History h = requireHistory(imageID); flush(h);
+			List<State> removing = selected(h, keys); removing.remove(h.states.get(0));
+			if (removing.isEmpty()) return 0;
+			State active = h.states.get(h.cursor);
+			if (removing.contains(active)) {
+				int target = h.cursor - 1;
+				while (target > 0 && removing.contains(h.states.get(target))) target--;
+				goTo(h, target);
+				// A cancelled or failed restore must not remove any selected snapshot.
+				if (h.cursor != target || h.problem != null) return 0;
+			}
+			active = h.states.get(h.cursor);
+			for (int i = h.states.size() - 1; i > 0; i--) if (removing.contains(h.states.get(i))) {
+				release(h.states.remove(i).snap); h.dropped++;
+			}
+			h.cursor = h.states.indexOf(active);
+			fireChanged(); return removing.size();
+		} finally { lock.unlock(); }
+	}
+
+	private History requireHistory(int imageID) {
+		History h = histories.get(imageID);
+		if (h == null || h.states.isEmpty() || h.untracked != null)
+			throw new IllegalArgumentException("The image history is no longer available.");
+		return h;
+	}
+
+	/** Range boundaries use stable identities; THROUGH includes its anchor, AFTER and BEFORE exclude it. */
+	long[] rangeKeys(int imageID, long anchor, String range) {
+		lock.lock();
+		try {
+			History h = requireHistory(imageID); flush(h);
+			int index = indexOf(h, anchor);
+			if (index < 0) throw new IllegalArgumentException("That step is no longer available.");
+			int from, to;
+			if ("through".equals(range)) { from = 1; to = index + 1; }
+			else if ("after".equals(range)) { from = index + 1; to = h.states.size(); }
+			else if ("before".equals(range)) { from = 1; to = index; }
+			else throw new IllegalArgumentException("Unknown step range.");
+			long[] result = new long[Math.max(0, to - from)];
+			for (int i = 0; i < result.length; i++) result[i] = h.states.get(from + i).key;
+			return result;
+		} finally { lock.unlock(); }
+	}
+
+	void annotate(int imageID, long key, String label, String note) {
+		lock.lock();
+		try {
+			History h = requireHistory(imageID); flush(h);
+			State state = selected(h, new long[] {key}).get(0);
+			if (label != null) {
+				if (label.trim().isEmpty()) throw new IllegalArgumentException("A step name cannot be empty.");
+				state.label = label.trim();
+			}
+			if (note != null) state.note = note;
+			fireChanged();
+		} finally { lock.unlock(); }
+	}
+
+	void setIncluded(int imageID, long[] keys, boolean included) {
+		lock.lock();
+		try {
+			History h = requireHistory(imageID); flush(h);
+			for (State state : selected(h, keys)) if (state != h.states.get(0)) state.included = included;
+			fireChanged();
+		} finally { lock.unlock(); }
+	}
+
+	/** Detached snapshot: no image window, history navigation or global results/selection restoration. */
+	ImagePlus snapshotOf(int imageID, long key) {
+		lock.lock();
+		try {
+			History h = requireHistory(imageID); flush(h);
+			State state = selected(h, new long[] {key}).get(0);
+			ImagePlus copy = state.snap.toImage(h.imp.getTitle() + " [" + state.label + "]", store);
+			if (state.snap.extras.roi != null) copy.setRoi((Roi) state.snap.extras.roi.clone());
+			return copy;
+		} catch (IOException ex) { throw new IllegalArgumentException("Could not read snapshot: " + ex.getMessage(), ex); }
+		finally { lock.unlock(); }
 	}
 
 	/** Resolves stable row identities under the lock: a refreshed or trimmed list cannot target another step. */
@@ -1041,13 +1166,15 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	// ---- read-only view for the window (no locking) ---------------------
 
 	static final class Row {
-		final String label, time, macroCode;
+		final String label, originalLabel, note, time, macroCode;
+		final boolean included;
 		final long key;
 		final boolean current, future, pinned, saved, clean;
 		Row(State s, boolean current, boolean future) {
 			key = s.key;
 			macroCode = s.macroCode;
 			label = s.label;
+			originalLabel = s.originalLabel; note = s.note; included = s.included;
 			time = s.timeString();
 			this.current = current;
 			this.future = future;
@@ -1192,12 +1319,15 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 
 	static final class State {
 		String label;
+		final String originalLabel;
+		String note = "";
+		boolean included = true;
 		final long time = System.currentTimeMillis();
 		final Snapshot snap;
 		final long key = NEXT_STATE.incrementAndGet();
 		String macroCode;
 		boolean pinned, saved, clean;
-		State(String label, Snapshot snap) { this.label = label; this.snap = snap; }
+		State(String label, Snapshot snap) { this.label = label; this.originalLabel = label; this.snap = snap; }
 		String timeString() {
 			return new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date(time));
 		}

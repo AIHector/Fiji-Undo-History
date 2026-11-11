@@ -70,10 +70,11 @@ All three are written in Java 8 for any system Fiji runs on, and their shortcuts
 |---|---|
 | Step back | **Edit ▸ Undo**, **⌘Z** on macOS, **Ctrl+Z** on Windows/Linux. Each press goes back one step |
 | Step forward (redo) | **⌘⌥Z** / **Ctrl+Alt+Z**, or **Edit ▸ Redo**; optionally also **⌘⇧Z** / **Ctrl+Shift+Z** (see [Options](#options)) |
-| See every step, jump to any of them | **Edit ▸ Undo History…**, select one row and press **Go to**, or double-click it |
-| Open a step as a new image (compare before/after) | Select one row, then **Copy** |
-| Never drop a step when space runs out | Select the row, then **Keep** |
-| Delete one step and free its space at once | Select the row, then **Delete** (on the step you are on, the image first goes back one step; the first step stays) |
+| See every step, jump to any of them | **Edit ▸ Undo History…**, select one row and press **Restore**, or double-click it |
+| Inspect a state without changing the working image | Select one row, then **Preview**; channel, slice and frame navigation are available where applicable |
+| Open a state as a new editable image | Select one row, then **Open image** |
+| Never drop a step when space runs out | Select the row, then **Keep**, or right-click ▸ Keep as checkpoint |
+| Delete one or several restore points | Select rows, then **Delete**; review the summary. The baseline stays. If the current state is selected, restore the nearest earlier retained state first |
 | Forget the steps of one image | **Clear** |
 | Bring back an image you closed, with its history | *Plugins ▸ Undo History ▸ Reopen Closed Image* |
 | Settings | **Options…**, or *Plugins ▸ Undo History ▸ Undo History Options…* |
@@ -98,9 +99,9 @@ ImageJ's own undo still handles what the history does not cover, such as a selec
 
 This development version can create a reusable ImageJ macro from selected history operations.
 
-1. Press **Record…** before performing operations you want to reuse. This opens ImageJ’s Macro Recorder; leave its **Record** choice set to **Macro**.
-2. Work on a test image. Steps with captured code are marked **[macro]**. Commands run by an ImageJ macro with an explicit option string can also retain that string without the Recorder.
-3. Select the operation rows to export. Use Shift for a range, or Cmd-click on macOS / Ctrl-click on Windows and Linux for separate rows. Selecting rows leaves the image unchanged. The first row is a baseline image, not an operation; leave it out.
+1. Tick **Record macro** in the Undo History window before performing operations you want to reuse. Recording can remain in the background. **Recorder…** shows ImageJ’s recorder if you want to inspect its text; keep its recording language set to **Macro**.
+2. Work on a test image. Steps with captured code are marked **[macro]**. Commands run by an ImageJ macro with an explicit option string can retain that string while history recording is enabled.
+3. Select the operation rows to export. Use Shift for a range, or Cmd-click on macOS / Ctrl-click on Windows and Linux for separate rows. Selecting rows leaves the image unchanged. The first row is a baseline image, not an operation. The panel automatically leaves it out of selected-operation exports.
 4. Press **Create macro…** to preview the code in history order, then **Save macro…** to save an `.ijm` file. Exporting does not run the macro.
 5. Open the saved file in Fiji’s macro editor. Review selections, channels, file paths and omitted-step dependencies, then try it on a duplicate of a suitable input image. Add the saved file to Side Toolbar’s macro shelf if desired.
 
@@ -108,7 +109,37 @@ This development version can create a reusable ImageJ macro from selected histor
 
 Recorded settings do not guarantee identical results on different images. A selected filter can depend on an earlier selection, channel, display threshold, measurement setting or intermediate step that was not selected. The export flags gaps in the selected history, but cannot infer every dependency. Plugin commands may also depend on external files or installed plugins. Code is kept with the in-session history; it is not recovered from an old release or stored as a persistent project.
 
-**History controls.** A single click selects rows. Double-click or **Go to** restores one step. Copy, Keep and Delete act on one selected row (or the current row if none is selected); they are disabled for multiple selection. Undo and Redo apply to the image shown in the panel when pressed. The opened baseline cannot be deleted. Deleting a snapshot frees its history storage; it does not reverse that operation within every later snapshot.
+### Recording checkbox
+
+**Record macro** is off by default and is remembered between launches. Ticking it creates a background native Macro Recorder if needed. Unticking stops attaching code to new history steps and preserves code already captured. A hidden recorder created by this plugin is closed when recording stops; an independently opened or visible Recorder is left intact, and can continue recording separately. Closing the Recorder or switching it to a different language turns off history capture when the panel refreshes.
+
+Recording applies to operations represented by history steps. Some interactive operations and commands that produce no tracked state may not have associated code. The existing missing-code and dependency warnings still apply; the checkbox does not reconstruct earlier instructions retrospectively.
+
+### Select, preview and restore
+
+A single click selects rows without changing the image. Shift selects a range; Cmd-click on macOS / Ctrl-click on Windows and Linux selects separate rows. Right-clicking within a selection preserves it; right-clicking outside selects the clicked row. Empty space has no step menu.
+
+**Preview** displays a detached snapshot in its own viewer without adding a tracked image or restoring shared Results or ROI Manager data. Channel, slice and frame controls appear when needed. Rendering and navigation run in the background, and the private image is released when the preview closes. **Restore** or a double-click explicitly restores a state in the working image. **Open image** creates a separate editable copy.
+
+### Batch deletion and ranges
+
+![Right-click actions for selected history steps](docs/history-context-menu.png)
+
+**Delete** accepts multiple selected rows. The confirmation states how many restore points and protected checkpoints are selected and whether the current state must move. The baseline is always retained. If the current state is selected, the image first restores the nearest earlier retained state; cancellation or failure leaves the selected restore points in place. The full selection is resolved before any snapshot is removed. If the current state or selected rows change while confirmation is open, the action is rejected for review.
+
+Deleting a restore point does **not** remove that operation’s effects from later snapshots. Explicit deletion is permanent and frees snapshot storage that is not shared with retained states. Keep protects checkpoints from automatic trimming, not from a confirmed explicit deletion. The recycle-bin idea is not part of this version.
+
+The right-click menu also offers **Delete steps before this** and **Delete steps after this**. Both exclude the clicked anchor; the before range also excludes the baseline. The same summary and restore rules apply.
+
+### Names, notes, checkpoints and inactive macro comments
+
+Right-click to rename a step, add or edit its note, or keep it as a checkpoint. The original operation name remains available in **Copy ▸ Step details**. Named, annotated or explicitly excluded selection/display states are not silently overwritten by automatic coalescing. Kept and saved states survive automatic trimming; the baseline and saved checkpoints cannot be unkept.
+
+**Include selected in exported macro** is independent of undo/redo. Turning it off retains the snapshot as a usable restore point and writes its code and note as comments in macro exports. Excluded rows have an explicit **[excluded]** tag, distinct from grey italic redo rows. Excluded missing code does not falsely block an otherwise complete recipe. Dependencies on excluded operations still need review.
+
+The export submenu offers selected instructions, a macro **through this step (inclusive)**, and a macro **after this step**. All use history order and can include retained redo rows. Copying macro text also preserves missing-code stops and exclusion comments rather than silently inventing commands.
+
+Names, notes, inclusion flags and checkpoints belong to the current in-session history. They are not a persistent project format. Illustrated document reports, additional file-format exporters, recoverable deletion storage, comparison views, searching and recipe reordering remain separate future work.
 
 ## How it stores the history: memory first, then disk
 
@@ -254,3 +285,7 @@ Developed with the help of Claude (Anthropic), from the author's design and requ
 Select history operations to preview and save their recorded macro code. The panel distinguishes selection from restoration, retains selections across refreshes and uses stable row identities when steps are removed. Missing code produces a stopped draft, so the exporter does not substitute guessed defaults. Delete frees an individual snapshot while preserving the baseline.
 
 Validated with 101 history integration checks, 11 macro unit checks and 6 interface behavior checks on ImageJ 1.54p and Java 21 on macOS. Use `./package.sh` to create a local package without installing it. `./test-usability.sh` checks row selection, restoration, export preview and control states in an isolated ImageJ.
+
+## Development version 1.4.0-dev1
+
+Adds batch and range deletion, context actions, detached stack-aware previews, notes, stable named checkpoints, macro inclusion comments, range exports and the Record macro checkbox. Build with `./package.sh`; `./test-controls.sh` exercises the new workflow in an isolated ImageJ. The accepted Window Layouts zoom implementation is unchanged.

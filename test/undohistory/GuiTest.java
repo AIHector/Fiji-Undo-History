@@ -47,6 +47,7 @@ public class GuiTest {
 		Prefs.set(Engine.PREF + "replaceUndo", true);
 		Prefs.set(Engine.PREF + "trimOnSave", false);
 		new ImageJ(ImageJ.NO_SHOW);
+		Prefs.set(Engine.PREF + "recordMacro", true);
 		new Undo_History().run("start");
 		engine = Engine.get();
 

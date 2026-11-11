@@ -17,7 +17,7 @@ final class MacroPreview {
         code.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
         code.setEditable(false);
         JLabel info = new JLabel(export.missing == 0
-                ? "Recorded code. Check omitted steps, image requirements and any file paths before use."
+                ? "Recorded code. " + export.excluded + " excluded step(s) are comments. Review dependencies before use."
                 : export.missing + " step(s) lack recorded code. This draft stops before running until completed.");
         info.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
         JButton save = new JButton(export.missing == 0 ? "Save macro…" : "Save draft…");

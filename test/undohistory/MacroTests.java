@@ -26,6 +26,14 @@ public final class MacroTests {
         check(injection.code.contains("// label run(\"Delete\");"), "labels cannot inject executable lines");
         Engine.Row a = row("same", null), b = row("same", null);
         check(a.key != b.key, "identical labels have distinct stable identities");
+        Engine.State excluded = new Engine.State("Excluded blur", null);
+        excluded.macroCode = "run(\"Gaussian Blur...\", \"sigma=2\");\nrun(\"Invert\");\n";
+        excluded.included = false; excluded.note = "Review\nrun(\"Delete\");";
+        MacroExport comments = new MacroExport(Arrays.asList(new Engine.Row(excluded,false,false)),false);
+        check(comments.missing == 0 && comments.excluded == 1, "excluded code is not counted as missing executable code");
+        check(comments.code.contains("// run(\"Invert\");"), "all lines of excluded code are comments");
+        check(comments.code.contains("// run(\"Delete\");"), "notes cannot inject executable lines");
+        check(comments.code.contains("[excluded]"), "exclusions remain explicit in exported recipe");
         System.out.println(pass + " macro unit checks passed");
     }
 }

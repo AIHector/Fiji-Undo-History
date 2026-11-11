@@ -21,6 +21,7 @@ final class MacroCapture {
 
     static synchronized Ticket begin(String command) {
         long current = ++generation;
+        if (!RecordingControl.enabled()) return null;
         String options = Macro.getOptions();
         // IJ.run supplies the exact option string on its macro thread, including an explicitly empty string.
         if (options != null) return new Ticket("run(\"" + quote(command) + "\", \"" + quote(options) + "\");\n", null, null, current);
@@ -31,7 +32,7 @@ final class MacroCapture {
     }
 
     static synchronized String finish(Ticket t) {
-        if (t == null) return null;
+        if (t == null || !RecordingControl.enabled()) return null;
         if (t.direct != null) return t.direct;
         if (t.generation != generation || t.before == null || t.recorder != Recorder.getInstance()
                 || !Recorder.record || Recorder.scriptMode()) return null;
