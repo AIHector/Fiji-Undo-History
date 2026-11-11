@@ -366,7 +366,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			} finally { lock.unlock(); }
 			return cmd; // nothing of ours to undo: let ImageJ undo selections etc.
 		}
-		if (isOwnCommand(cmd)) return cmd;
+		if (isOwnCommand(cmd)) { MacroCapture.invalidate(); return cmd; }
 		lastCommand = cmd;
 		ImagePlus imp = WindowManager.getCurrentImage();
 		if (imp != null && imp.getWindow() != null && !histories.containsKey(imp.getID())) {
@@ -393,6 +393,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 					flush(h); // commit earlier edits (a brush stroke, the previous macro command) as their own step
 				} finally { lock.unlock(); }
 			}
+			h.pendingMacro = MacroCapture.begin(cmd);
 			h.pendingCommand = cmd;
 			h.pendingTool = null;
 			h.dirty = true;
@@ -405,7 +406,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 				commandThreads.add(t);
 			} else
 				lastMacroCommand = System.currentTimeMillis();
-		}
+		} else MacroCapture.invalidate();
 		return cmd;
 	}
 
@@ -646,6 +647,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		if (h.retryBaseline && h.dirty) {
 			h.dirty = false;
 			h.pendingCommand = null;
+			h.pendingMacro = null;
 			h.pendingTool = null;
 			captureBaseline(h, "Tracking started (no room when opened)");
 			fireChanged();
@@ -674,16 +676,20 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		} catch (Store.NoRoomException e) {
 			h.problem = "Last change not recorded: " + e.getMessage();
 			h.pendingCommand = null;
+			h.pendingMacro = null;
 			h.pendingTool = null;
 			IJ.showStatus("Undo History: " + h.problem);
 			fireChanged();
 			return;
 		}
 		lastCaptureMs = (System.nanoTime() - t0) / 1e6;
+		String macroCode = h.pendingCommand == null ? null : MacroCapture.finish(h.pendingMacro);
+		h.pendingMacro = null;
 		boolean fromCommand = h.pendingCommand != null;
 		String label = h.pendingCommand != null ? pretty(h.pendingCommand)
 				: h.pendingTool != null ? h.pendingTool : "Edit";
 		h.pendingCommand = null;
+		h.pendingMacro = null;
 		h.pendingTool = null;
 		if (s == null) { noChangeCaptures++; return; }
 		if (s.metaOnly && !fromCommand) {
@@ -705,6 +711,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			return;
 		}
 		State st = new State(label, s);
+		st.macroCode = macroCode;
 		// a selection, display or ROI Manager change leaves the image as saved, as in ImageJ (no "Save changes?")
 		if (s.metaOnly) st.clean = cur.clean && !imp.changes;
 		h.states.add(st);
@@ -748,6 +755,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		h.dirty = false;
 		h.problem = null;
 		h.pendingCommand = null;
+		h.pendingMacro = null;
 		h.pendingTool = null;
 		Undo.reset();
 		imp.changes = !s.clean;
@@ -921,6 +929,83 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		fireChanged();
 	}
 
+	/**
+	 * Deletes step k and frees its snapshot (memory or disk), except image planes that other steps share.
+	 * The first step (the image as opened) stays. If k is the current step, the image first goes back to the
+	 * previous step. Returns false if nothing was deleted.
+	 */
+	boolean delete(int imageID, int k) {
+		lock.lock();
+		try {
+			History h = histories.get(imageID);
+			if (h == null) return false;
+			flush(h);
+			if (k <= 0 || k >= h.states.size()) return false;
+			State selected = h.states.get(k);
+			if (k == h.cursor) goTo(h, k - 1);
+			// A cancelled or failed restore must leave both the image and its history intact.
+			if (h.cursor == k || k >= h.states.size() || h.states.get(k) != selected) return false;
+			release(h.states.remove(k).snap);
+			if (k < h.cursor) h.cursor--;
+			h.dropped++;
+			fireChanged();
+			return true;
+		} finally { lock.unlock(); }
+	}
+
+	/** Resolves stable row identities under the lock: a refreshed or trimmed list cannot target another step. */
+	void rowAction(int imageID, long key, String action) {
+		lock.lock();
+		try {
+			History h = histories.get(imageID);
+			if (h == null) return;
+			flush(h);
+			int k = indexOf(h, key);
+			if (k < 0) { IJ.showStatus("Undo History: that step is no longer available"); return; }
+			if ("go".equals(action)) goTo(imageID, k);
+			else if ("keep".equals(action)) togglePin(imageID, k);
+			else if ("delete".equals(action)) delete(imageID, k);
+			else if ("copy".equals(action)) { ImagePlus c = copyOf(imageID, k); if (c != null) c.show(); }
+		} finally { lock.unlock(); }
+	}
+
+	void stepImage(int imageID, int delta) {
+		lock.lock();
+		try {
+			History h = histories.get(imageID);
+			if (h == null) return;
+			flush(h);
+			goTo(h, delta < 0 ? undoTarget(h) : h.cursor + 1);
+		} finally { lock.unlock(); }
+	}
+
+	private static int indexOf(History h, long key) {
+		for (int i = 0; i < h.states.size(); i++) if (h.states.get(i).key == key) return i;
+		return -1;
+	}
+
+	MacroExport exportMacro(int imageID, long[] keys) {
+		lock.lock();
+		try {
+			History h = histories.get(imageID);
+			if (h == null || keys.length == 0) throw new IllegalArgumentException("Select the steps to export first.");
+			flush(h);
+			java.util.Set<Long> wanted = new java.util.HashSet<>();
+			for (long key : keys) wanted.add(key);
+			List<Row> rows = new ArrayList<>();
+			int previous = -1;
+			boolean gaps = h.dropped > 0;
+			for (int i = 0; i < h.states.size(); i++) if (wanted.remove(h.states.get(i).key)) {
+				if (i == 0) throw new IllegalArgumentException("The first row is an image state, not an operation. Select later steps.");
+				if (previous >= 0 && i != previous + 1) gaps = true;
+				rows.add(new Row(h.states.get(i), i == h.cursor, i > h.cursor));
+				previous = i;
+			}
+			if (!wanted.isEmpty()) throw new IllegalArgumentException("Some selected steps are no longer available. Select them again.");
+			return new MacroExport(rows, gaps);
+		} finally { lock.unlock(); }
+	}
+
 	ImagePlus copyOf(int imageID, int k) {
 		History h = histories.get(imageID);
 		if (h == null || k < 0 || k >= h.states.size()) return null;
@@ -956,9 +1041,12 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	// ---- read-only view for the window (no locking) ---------------------
 
 	static final class Row {
-		final String label, time;
+		final String label, time, macroCode;
+		final long key;
 		final boolean current, future, pinned, saved, clean;
 		Row(State s, boolean current, boolean future) {
+			key = s.key;
+			macroCode = s.macroCode;
 			label = s.label;
 			time = s.timeString();
 			this.current = current;
@@ -1100,10 +1188,14 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 
 	// ---- data -----------------------------------------------------------
 
+	private static final java.util.concurrent.atomic.AtomicLong NEXT_STATE = new java.util.concurrent.atomic.AtomicLong();
+
 	static final class State {
 		String label;
 		final long time = System.currentTimeMillis();
 		final Snapshot snap;
+		final long key = NEXT_STATE.incrementAndGet();
+		String macroCode;
 		boolean pinned, saved, clean;
 		State(String label, Snapshot snap) { this.label = label; this.snap = snap; }
 		String timeString() {
@@ -1132,6 +1224,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		volatile boolean metaOnly;
 		volatile long lastUpdate;
 		volatile String pendingCommand, pendingTool;
+		MacroCapture.Ticket pendingMacro;
 		boolean lastChanges;
 		History(ImagePlus imp) { this.imp = imp; this.title = imp.getTitle(); }
 	}

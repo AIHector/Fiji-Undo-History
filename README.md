@@ -31,11 +31,11 @@ ImageJ 1.x, the engine underneath Fiji, keeps one undo buffer. Undo reverts only
 | Feature | What you get |
 |---|---|
 | **Undo as far back as you need** | **⌘Z** / **Ctrl+Z** steps back again and again; **⌘⌥Z** / **Ctrl+Alt+Z** steps forward |
-| **A panel with every step** | click any step to go back to it; copy a step as a new image to compare before and after |
+| **A panel with every step** | double-click any step to go back to it; copy a step as a new image to compare before and after |
 | **More than pixels** | selections, overlays, display range and LUTs, calibration, the ROI Manager list and the Results table are steps too |
 | **Closed by mistake?** | *Reopen Closed Image* brings an image back with its whole history |
 | **Light on memory** | a step that changes no pixels shares the planes of the step before; older steps move to disk when the memory budget is full; the budget and the disk folder are settings |
-| **Works with macros** | each `run("…")` call in a macro is one step |
+| **Works with macros** | each `run("…")` call in a macro is one step; selected recorded operations can be previewed and saved as a reusable macro |
 
 ## Install
 
@@ -70,9 +70,10 @@ All three are written in Java 8 for any system Fiji runs on, and their shortcuts
 |---|---|
 | Step back | **Edit ▸ Undo**, **⌘Z** on macOS, **Ctrl+Z** on Windows/Linux. Each press goes back one step |
 | Step forward (redo) | **⌘⌥Z** / **Ctrl+Alt+Z**, or **Edit ▸ Redo**; optionally also **⌘⇧Z** / **Ctrl+Shift+Z** (see [Options](#options)) |
-| See every step, jump to any of them | **Edit ▸ Undo History…** and click a row |
-| Open a step as a new image (compare before/after) | Select the row, then **Copy** |
+| See every step, jump to any of them | **Edit ▸ Undo History…**, select one row and press **Go to**, or double-click it |
+| Open a step as a new image (compare before/after) | Select one row, then **Copy** |
 | Never drop a step when space runs out | Select the row, then **Keep** |
+| Delete one step and free its space at once | Select the row, then **Delete** (on the step you are on, the image first goes back one step; the first step stays) |
 | Forget the steps of one image | **Clear** |
 | Bring back an image you closed, with its history | *Plugins ▸ Undo History ▸ Reopen Closed Image* |
 | Settings | **Options…**, or *Plugins ▸ Undo History ▸ Undo History Options…* |
@@ -92,6 +93,22 @@ In the window, `▶` marks the current state, and grey italic rows are steps you
 After File ▸ Save, the current step is marked **[saved]**. Going back to the opened or the saved state clears the "unsaved changes" flag.
 
 ImageJ's own undo still handles what the history does not cover, such as a selection change on an unedited image, or a paste that is still floating.
+
+## Turn selected history steps into a macro
+
+This development version can create a reusable ImageJ macro from selected history operations.
+
+1. Press **Record…** before performing operations you want to reuse. This opens ImageJ’s Macro Recorder; leave its **Record** choice set to **Macro**.
+2. Work on a test image. Steps with captured code are marked **[macro]**. Commands run by an ImageJ macro with an explicit option string can also retain that string without the Recorder.
+3. Select the operation rows to export. Use Shift for a range, or Cmd-click on macOS / Ctrl-click on Windows and Linux for separate rows. Selecting rows leaves the image unchanged. The first row is a baseline image, not an operation; leave it out.
+4. Press **Create macro…** to preview the code in history order, then **Save macro…** to save an `.ijm` file. Exporting does not run the macro.
+5. Open the saved file in Fiji’s macro editor. Review selections, channels, file paths and omitted-step dependencies, then try it on a duplicate of a suitable input image. Add the saved file to Side Toolbar’s macro shelf if desired.
+
+**What can be recovered.** Code must have been captured when an operation was performed. Earlier history labels cannot recover settings retrospectively. Brush strokes, adjustment windows, interactive selections and third-party plugins without recorded code are marked as missing. A draft with missing code contains a stop before all operations and TODO comments, so it does not quietly run an incomplete workflow. Repeat the missing operations with recording enabled, or complete the code in the editor before removing the stop.
+
+Recorded settings do not guarantee identical results on different images. A selected filter can depend on an earlier selection, channel, display threshold, measurement setting or intermediate step that was not selected. The export flags gaps in the selected history, but cannot infer every dependency. Plugin commands may also depend on external files or installed plugins. Code is kept with the in-session history; it is not recovered from an old release or stored as a persistent project.
+
+**History controls.** A single click selects rows. Double-click or **Go to** restores one step. Copy, Keep and Delete act on one selected row (or the current row if none is selected); they are disabled for multiple selection. Undo and Redo apply to the image shown in the panel when pressed. The opened baseline cannot be deleted. Deleting a snapshot frees its history storage; it does not reverse that operation within every later snapshot.
 
 ## How it stores the history: memory first, then disk
 
@@ -200,7 +217,9 @@ You need a Fiji installation; its bundled Java is used.
 ./bench.sh 1024 2048 4096               # size ladder in MB (needs RAM; HEAP=18g and PCT=20 are optional)
 ```
 
-`test.sh` checks 90 behaviours:
+`test.sh` checks the existing history behaviours and selected-step macro export, including pixel-exact replay. `./test-headless.sh` checks macro construction without opening windows. The test process uses its own preferences folder.
+
+The integration checks cover:
 
 - menu and macro commands
 - brush strokes
@@ -229,3 +248,9 @@ Tested with ImageJ 1.54p and Java 21 (Fiji 2.18) on macOS. The jar targets Java 
 MIT License, © 2026 Ettore Colombo. See [LICENSE](LICENSE).
 
 Developed with the help of Claude (Anthropic), from the author's design and requirements, then tested on real data.
+
+## Version 1.3.0
+
+Select history operations to preview and save their recorded macro code. The panel distinguishes selection from restoration, retains selections across refreshes and uses stable row identities when steps are removed. Missing code produces a stopped draft, so the exporter does not substitute guessed defaults. Delete frees an individual snapshot while preserving the baseline.
+
+Validated with 101 history integration checks, 11 macro unit checks and 6 interface behavior checks on ImageJ 1.54p and Java 21 on macOS. Use `./package.sh` to create a local package without installing it. `./test-usability.sh` checks row selection, restoration, export preview and control states in an isolated ImageJ.
