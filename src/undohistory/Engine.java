@@ -517,6 +517,13 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	private void releaseAll(History h) {
 		for (State s : h.states) release(s.snap);
 		h.states.clear();
+		releaseAnchors(h);
+	}
+
+	private void releaseAnchors(History h) {
+		if (h.original != null) release(h.original.snap);
+		if (h.lastSaved != null) release(h.lastSaved.snap);
+		h.original = h.lastSaved = null;
 	}
 
 	/** An image the same command opened with the same title, that has only its first state: it replaces the closed one. */
@@ -542,6 +549,10 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	 */
 	private void adopt(History old, History heir) {
 		closed.remove(old);
+		releaseAnchors(heir);
+		heir.original = old.original;
+		heir.lastSaved = old.lastSaved;
+		old.original = old.lastSaved = null;
 		while (old.states.size() > old.cursor + 1) release(old.states.remove(old.states.size() - 1).snap);
 		State born = heir.states.get(0);
 		born.label = pretty(heir.createdBy);
@@ -594,7 +605,14 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	/** Duration of the last capture (compare + copy), for diagnostics and benchmarks. */
 	volatile double lastCaptureMs;
 
+	static boolean supportsHistory(ImagePlus imp) {
+		if (imp == null || imp.getWindow() == null) return false;
+		Class<?> type = imp.getWindow().getClass();
+		return type == ij.gui.ImageWindow.class || type == ij.gui.StackWindow.class;
+	}
+
 	private void register(ImagePlus imp, String label) {
+		if (!supportsHistory(imp)) return;
 		if (histories.containsKey(imp.getID()) || imp.getWindow() == null) return;
 		processCloses(); // memory of images closed a moment ago is free again
 		History h = new History(imp);
@@ -634,6 +652,16 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 					h.untracked = null;
 					h.retryBaseline = false;
 					retain(s, st.time);
+					if (h.original == null) {
+						h.original = st;
+						retain(s, st.time);
+						ij.io.FileInfo file = imp.getOriginalFileInfo();
+						if (st.clean && file != null && file.fileName != null && file.directory != null) {
+							h.lastSaved = st;
+							st.saved = true;
+							retain(s, st.time);
+						}
+					}
 				}
 			} catch (Store.NoRoomException e) {
 				h.untracked = e.getMessage();
@@ -797,6 +825,10 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		if (h.states.isEmpty()) return;
 		State s = h.states.get(h.cursor);
 		for (State o : h.states) o.clean = false;
+		if (h.original != null) h.original.clean = false;
+		if (h.lastSaved != null) { h.lastSaved.clean = false; release(h.lastSaved.snap); }
+		h.lastSaved = s;
+		retain(s.snap, s.time);
 		s.clean = true;
 		s.saved = true;
 		s.pinned = true;
@@ -900,6 +932,32 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			flush(h);
 			if (k != h.cursor || h.problem != null) goTo(h, k);
 		} finally { lock.unlock(); }
+	}
+
+	/** Restore a retained reference state even if its row was deleted, cleared or left on a discarded branch. */
+	void restoreReference(int imageID, boolean saved) {
+		lock.lock();
+		try {
+			processQueues();
+			History h = histories.get(imageID);
+			if (h == null) throw new IllegalArgumentException("Choose a tracked image first.");
+			flush(h);
+			State reference = saved ? h.lastSaved : h.original;
+			if (reference == null) throw new IllegalArgumentException(saved ? "No saved state has been recorded for this image." : "The original tracked state is unavailable.");
+			int k = indexOf(h, reference.key);
+			if (k >= 0) { goTo(h, k); return; } // also reapply an already-current snapshot
+			State restored = new State(saved ? "Restored last saved state" : "Restored original state", reference.snap);
+			restored.clean = reference == h.lastSaved || (h.lastSaved == null && reference.clean);
+			restored.saved = reference == h.lastSaved;
+			restored.pinned = restored.saved;
+			retain(restored.snap, restored.time);
+			h.states.add(restored);
+			k = h.states.size() - 1;
+			goTo(h, k);
+			if (h.cursor != k) { h.states.remove(k); release(restored.snap); return; } // cancelled or failed restore
+			enforceStepLimit(h);
+		} finally { lock.unlock(); }
+		fireChanged();
 	}
 
 	void togglePin(int imageID, int k) {
@@ -1188,6 +1246,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		String title;
 		String untracked, problem;
 		int dropped;
+		boolean hasOriginal, hasSaved;
 		final List<Row> rows = new ArrayList<>();
 	}
 
@@ -1219,6 +1278,8 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		v.untracked = h.untracked;
 		v.problem = h.problem;
 		v.dropped = h.dropped;
+		v.hasOriginal = h.original != null;
+		v.hasSaved = h.lastSaved != null;
 		List<State> states = h.states;
 		int cursor = h.cursor;
 		for (int i = 0; i < states.size(); i++)
@@ -1341,6 +1402,8 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		volatile long closedAt;
 		volatile java.awt.Point lastLocation;
 		final List<State> states = new ArrayList<>();
+		/** Independently retained snapshots; deleting history rows never discards these reference states. */
+		State original, lastSaved;
 		final List<Thread> threads = new CopyOnWriteArrayList<>();
 		int cursor = -1;
 		int dropped;

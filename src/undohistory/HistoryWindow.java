@@ -10,23 +10,24 @@ import java.awt.datatransfer.StringSelection;
 import java.awt.event.*;
 import java.util.*;
 
-/** Select rows for actions; preview and restore deliberately have different effects. */
+/** Navigation, reference restoration, selected-step actions and recording each have their own place. */
 final class HistoryWindow extends JFrame {
     private static HistoryWindow instance;
     private static final String LOC = Engine.PREF + "window.loc";
     private final Engine engine = Engine.get();
     private final DefaultListModel<Engine.Row> model = new DefaultListModel<>();
     private final JList<Engine.Row> list = new HistoryList();
-    private final JLabel header = new JLabel(" "), footer = new JLabel(" ");
+    private final JLabel header = new JLabel(" "), footer = new JLabel(" "), selectionInfo = new JLabel("Current step");
     private final JCheckBox recordMacro = new JCheckBox("Record macro");
-    private final JButton undo = new JButton("Undo"), redo = new JButton("Redo"), go = new JButton("Restore"),
-            preview = new JButton("Preview"), copy = new JButton("Open image"), keep = new JButton("Keep"),
-            macro = new JButton("Create macro…"), delete = new JButton("Delete"), clear = new JButton("Clear"),
-            options = new JButton("Options…"), record = new JButton("Recorder…");
+    private final JButton undo = new JButton("Undo"), redo = new JButton("Redo"), go = new JButton("Go to step"),
+            restore = new JButton("Restore"), preview = new JButton("Preview"), copy = new JButton("Open copy"), keep = new JButton("Keep checkpoint"),
+            macro = new JButton("Create macro…"), delete = new JButton("Delete…"), clear = new JButton("Clear history…"),
+            options = new JButton("Settings…"), record = new JButton("Recorder…");
+    private final JComboBox<String> referenceTarget = new JComboBox<>(new String[]{"Original tracked state", "Last saved state"});
     private final Runnable refresher = this::refresh;
     private final javax.swing.Timer timer;
     private int imageID, shownStamp = -1;
-    private boolean busy, restoreProblem;
+    private boolean busy, restoreProblem, hasOriginal, hasSaved;
     private JPopupMenu lastPopup;
 
     static void showWindow() {
@@ -54,6 +55,9 @@ final class HistoryWindow extends JFrame {
         footer.setFont(footer.getFont().deriveFont(footer.getFont().getSize2D()-1));
         undo.setToolTipText("Restore the previous state"); redo.setToolTipText("Restore the next available state");
         go.setToolTipText("Restore one selected state in the working image");
+        restore.setToolTipText("Reset the working image to the original tracked state or the last saved state; row selection does not affect this action");
+        referenceTarget.setToolTipText("Choose the reference state for Restore. Original means when Undo History began tracking this image.");
+        referenceTarget.addActionListener(e -> updateButtons());
         preview.setToolTipText("Inspect a detached snapshot without changing the working image or history");
         copy.setToolTipText("Open one selected state as a new editable image");
         keep.setToolTipText("Protect this checkpoint from automatic history trimming");
@@ -69,29 +73,44 @@ final class HistoryWindow extends JFrame {
         macro.addActionListener(e -> exportMacro(imageID, selectedKeys(true), false));
         clear.addActionListener(e -> {
             final int id=imageID;
-            if (JOptionPane.showConfirmDialog(this,"Forget every restore point except the current state?",
+            if (JOptionPane.showConfirmDialog(this,"Clear the step list except the current state?\nOriginal and last saved reference states will remain available in Reset image.",
                     "Clear history",JOptionPane.OK_CANCEL_OPTION)==JOptionPane.OK_OPTION) run(() -> engine.clear(id));
         });
-        options.addActionListener(e -> run(Undo_History::showOptions));
+        options.addActionListener(e -> showSettings());
+        restore.addActionListener(e -> { final int id=imageID; final boolean saved=referenceTarget.getSelectedIndex()==1; run(() -> engine.restoreReference(id,saved)); });
         recordMacro.addActionListener(e -> {
             recordMacro.setSelected(RecordingControl.setEnabled(recordMacro.isSelected()));
             updateButtons();
         });
         record.addActionListener(e -> { RecordingControl.showRecorder(); recordMacro.setSelected(RecordingControl.enabled()); });
 
-        JPanel recording = new JPanel(new FlowLayout(FlowLayout.LEFT,6,0));
-        recording.add(recordMacro); recording.add(record);
-        JPanel north = new JPanel(new BorderLayout()); north.add(header,BorderLayout.NORTH);
-        JLabel hint = new JLabel("Select rows for actions · Right-click for more · Double-click to restore");
-        hint.setBorder(BorderFactory.createEmptyBorder(0,8,4,8));
-        hint.setFont(hint.getFont().deriveFont(hint.getFont().getSize2D()-1));
-        north.add(hint,BorderLayout.CENTER); north.add(recording,BorderLayout.SOUTH);
-        JPanel buttons = new JPanel(new GridLayout(0,3,4,4));
-        buttons.setBorder(BorderFactory.createEmptyBorder(4,6,2,6));
-        for (JButton button : new JButton[]{undo,redo,go,preview,copy,keep,macro,delete,clear,options}) buttons.add(button);
-        JPanel south = new JPanel(new BorderLayout()); south.add(buttons,BorderLayout.NORTH);south.add(footer,BorderLayout.SOUTH);
+        JButton[] all={undo,redo,restore,go,preview,copy,keep,macro,delete,clear,options,record};
+        String[] kinds={"undo","redo","restore","go","preview","copy","keep","macro","delete","clear","options","record"};
+        for(int i=0;i<all.length;i++) {
+            all[i].putClientProperty("actionLabel",all[i].getText());
+            all[i].putClientProperty("actionIcon",new ActionIcon(kinds[i]));
+            all[i].setMargin(new Insets(5,8,5,8));
+        }
+        applyButtonStyle();
+        JPanel heading=new JPanel(new BorderLayout());heading.add(header,BorderLayout.CENTER);heading.add(options,BorderLayout.EAST);
+        JPanel navigation=row();navigation.add(undo);navigation.add(redo);
+        JPanel reset=row();reset.add(new JLabel("Reset image:"));reset.add(referenceTarget);reset.add(restore);
+        JPanel north = new JPanel();north.setLayout(new BoxLayout(north,BoxLayout.Y_AXIS));
+        north.add(heading);north.add(navigation);north.add(reset);
+        JPanel selected=row();selected.add(preview);selected.add(go);selected.add(copy);
+        JPanel manage=new JPanel(new BorderLayout(8,0));
+        JPanel create=row();create.add(keep);create.add(macro);manage.add(create,BorderLayout.WEST);manage.add(delete,BorderLayout.EAST);
+        selectionInfo.setBorder(BorderFactory.createEmptyBorder(2,4,2,4));
+        selectionInfo.setFont(selectionInfo.getFont().deriveFont(Font.BOLD));
+        JPanel recording=new JPanel(new BorderLayout());recording.add(recordMacro,BorderLayout.WEST);recording.add(record,BorderLayout.EAST);
+        JPanel actions=new JPanel();actions.setLayout(new BoxLayout(actions,BoxLayout.Y_AXIS));
+        actions.setBorder(BorderFactory.createEmptyBorder(4,8,2,8));
+        actions.add(selectionInfo);actions.add(selected);actions.add(manage);
+        actions.add(Box.createVerticalStrut(5));actions.add(new JSeparator());actions.add(Box.createVerticalStrut(5));actions.add(recording);
+        for(Component component:actions.getComponents())if(component instanceof JComponent)((JComponent)component).setAlignmentX(Component.LEFT_ALIGNMENT);
+        JPanel south = new JPanel(new BorderLayout());south.add(actions,BorderLayout.CENTER);south.add(footer,BorderLayout.SOUTH);
         add(north,BorderLayout.NORTH);add(new JScrollPane(list),BorderLayout.CENTER);add(south,BorderLayout.SOUTH);
-        setSize(560,560);setMinimumSize(new Dimension(470,330));
+        setSize(560,640);setMinimumSize(new Dimension(510,460));
         Point location=Prefs.getLocation(LOC);if(location!=null)setLocation(location);else setLocationRelativeTo(null);
         engine.addChangeListener(refresher);timer=new javax.swing.Timer(400,e -> refresh());timer.start();
         WindowManager.addWindow(this);
@@ -99,6 +118,32 @@ final class HistoryWindow extends JFrame {
             Prefs.saveLocation(LOC,getLocation());timer.stop();engine.removeChangeListener(refresher);
             WindowManager.removeWindow(HistoryWindow.this);instance=null;
         }});
+    }
+
+    private static JPanel row() { return new JPanel(new FlowLayout(FlowLayout.LEFT,6,3)); }
+    private JButton[] styledButtons() { return new JButton[]{undo,redo,restore,go,preview,copy,keep,macro,delete,clear,options,record}; }
+    private void label(JButton button,String text) { button.putClientProperty("actionLabel",text);style(button); }
+    private void style(JButton button) {
+        String mode=Prefs.get(Engine.PREF+"buttonStyle","both"), text=(String)button.getClientProperty("actionLabel");
+        button.setText(mode.equals("icons")?"":text);
+        button.setIcon(mode.equals("text")?null:(Icon)button.getClientProperty("actionIcon"));
+        button.getAccessibleContext().setAccessibleName(text);
+        if(button.getToolTipText()==null)button.setToolTipText(text);
+    }
+    private void applyButtonStyle() { for(JButton button:styledButtons())style(button);revalidate();repaint(); }
+    private void showSettings() {
+        JPopupMenu popup=new JPopupMenu();
+        item(popup,"History settings…",() -> run(Undo_History::showOptions),!busy);
+        JMenu display=new JMenu("Button appearance");popup.add(display);ButtonGroup group=new ButtonGroup();
+        String[] modes={"both","text","icons"},names={"Icons and text","Text only","Icons only"};
+        for(int i=0;i<modes.length;i++) {
+            final String mode=modes[i];
+            JRadioButtonMenuItem choice=new JRadioButtonMenuItem(names[i],Prefs.get(Engine.PREF+"buttonStyle","both").equals(mode));
+            group.add(choice);display.add(choice);
+            choice.addActionListener(e -> {Prefs.set(Engine.PREF+"buttonStyle",mode);Prefs.savePreferences();applyButtonStyle();});
+        }
+        popup.addSeparator();item(popup,"Clear history…",clear::doClick,clear.isEnabled());
+        popup.show(options,0,options.getHeight());
     }
 
     private void run(Runnable action) {
@@ -229,11 +274,17 @@ final class HistoryWindow extends JFrame {
         boolean enabled=!busy&&current>=0,single=enabled&&list.getSelectedIndices().length<=1;
         int selected=selectedOrCurrent();
         undo.setEnabled(enabled&&(current>0||restoreProblem));redo.setEnabled(enabled&&current+1<model.size());
-        go.setEnabled(single&&selected>=0&&(selected!=current||restoreProblem));preview.setEnabled(single);copy.setEnabled(single);
+        go.setEnabled(single&&selected>=0);preview.setEnabled(single);copy.setEnabled(single);
+        restore.setEnabled(enabled&&(referenceTarget.getSelectedIndex()==1?hasSaved:hasOriginal));
+        referenceTarget.setEnabled(enabled);
+        restore.setToolTipText(referenceTarget.getSelectedIndex()==1&&!hasSaved?"Save the image first to create a saved restore point":"Restore "+referenceTarget.getSelectedItem()+" independently of the selected rows; Undo/Redo retains available history");
         keep.setEnabled(single&&selected>0&&!model.get(selected).saved);
-        keep.setText(selected>=0&&selected<model.size()&&model.get(selected).pinned?"Unkeep":"Keep");
+        label(keep,selected==0?"Baseline protected":selected>=0&&selected<model.size()&&model.get(selected).saved?"Saved checkpoint":
+                selected>=0&&selected<model.size()&&model.get(selected).pinned?"Release checkpoint":"Keep checkpoint");
         int deletable=selectedKeys(true).length;delete.setEnabled(enabled&&deletable>0);
-        delete.setText(deletable>1?"Delete ("+deletable+")":"Delete");
+        label(delete,deletable>1?"Delete ("+deletable+")…":"Delete…");
+        int count=list.getSelectedIndices().length;
+        selectionInfo.setText(count>1?count+" selected steps":count==1?"Selected step":"Current step · select rows for more actions");
         macro.setEnabled(enabled&&deletable>0);clear.setEnabled(enabled&&model.size()>1);
         recordMacro.setEnabled(!busy);record.setEnabled(!busy);options.setEnabled(!busy);list.setEnabled(!busy);
     }
@@ -242,14 +293,15 @@ final class HistoryWindow extends JFrame {
         RecordingControl.sync();recordMacro.setSelected(RecordingControl.enabled());
         ImagePlus image=WindowManager.getCurrentImage();int id=image==null?0:image.getID();
         Engine.View view=image==null?null:engine.view(id);
-        int stamp=view==null?0:Objects.hash(id,view.title,view.untracked,view.dropped,rowsSignature(view));
+        int stamp=view==null?0:Objects.hash(id,view.title,view.untracked,view.dropped,view.hasOriginal,view.hasSaved,rowsSignature(view));
         footer.setText("Memory "+mb(engine.usedBytes())+" / "+gb(engine.store.ramBudget)
                 +(engine.store.diskEnabled?" · Disk "+mb(engine.diskBytes())+" / "+gb(engine.store.diskBudget):""));
         if(stamp==shownStamp&&id==imageID)return;
         Set<Long> selected=new HashSet<>();if(id==imageID)for(Engine.Row row:list.getSelectedValuesList())selected.add(row.key);
-        shownStamp=stamp;imageID=id;restoreProblem=view!=null&&view.problem!=null;model.clear();updateButtons();
+        shownStamp=stamp;imageID=id;restoreProblem=view!=null&&view.problem!=null;
+        hasOriginal=view!=null&&view.hasOriginal;hasSaved=view!=null&&view.hasSaved;model.clear();updateButtons();
         if(image==null){header.setText("No image open");return;}
-        if(view==null||view.untracked!=null){header.setText(image.getTitle()+": not tracked");return;}
+        if(view==null||view.untracked!=null){header.setText(image.getTitle()+(Engine.supportsHistory(image)?": not tracked":" · native tool"));return;}
         header.setText("<html>"+esc(view.title)+"<br><span style='font-weight:normal'>"+(view.rows.size()-1)+" step(s)"
                 +(view.dropped>0?" · "+view.dropped+" step(s) removed":"")+"</span>"
                 +(view.problem!=null?"<br><span style='color:#b00020'>"+esc(view.problem)+"</span>":"")+"</html>");

@@ -70,14 +70,14 @@ All three are written in Java 8 for any system Fiji runs on, and their shortcuts
 |---|---|
 | Step back | **Edit ▸ Undo**, **⌘Z** on macOS, **Ctrl+Z** on Windows/Linux. Each press goes back one step |
 | Step forward (redo) | **⌘⌥Z** / **Ctrl+Alt+Z**, or **Edit ▸ Redo**; optionally also **⌘⇧Z** / **Ctrl+Shift+Z** (see [Options](#options)) |
-| See every step, jump to any of them | **Edit ▸ Undo History…**, select one row and press **Restore**, or double-click it |
+| See every step, jump to any of them | **Edit ▸ Undo History…**, select one row and press **Go to step**, or double-click it |
 | Inspect a state without changing the working image | Select one row, then **Preview**; channel, slice and frame navigation are available where applicable |
-| Open a state as a new editable image | Select one row, then **Open image** |
-| Never drop a step when space runs out | Select the row, then **Keep**, or right-click ▸ Keep as checkpoint |
+| Open a state as a new editable image | Select one row, then **Open copy** |
+| Never drop a step when space runs out | Select the row, then **Keep checkpoint**, or right-click ▸ Keep as checkpoint |
 | Delete one or several restore points | Select rows, then **Delete**; review the summary. The baseline stays. If the current state is selected, restore the nearest earlier retained state first |
-| Forget the steps of one image | **Clear** |
+| Forget the steps of one image | **Settings… ▸ Clear history…**; original and last saved reference snapshots remain available |
 | Bring back an image you closed, with its history | *Plugins ▸ Undo History ▸ Reopen Closed Image* |
-| Settings | **Options…**, or *Plugins ▸ Undo History ▸ Undo History Options…* |
+| Settings | **Settings… ▸ History settings…**, or *Plugins ▸ Undo History ▸ Undo History Options…* |
 
 On Windows and Linux the AltGr key is reported as Ctrl+Alt, and on some keyboards AltGr+Z types a letter (ż in Polish). While a text field has the focus, Ctrl+Alt+Z is therefore left to the field: click the image first, or use **Edit ▸ Redo**.
 
@@ -91,7 +91,7 @@ Each of these counts as one step:
 
 In the window, `▶` marks the current state, and grey italic rows are steps you can redo. If you undo and then make a new change, the redo steps are discarded, the same as in any editor.
 
-After File ▸ Save, the current step is marked **[saved]**. Going back to the opened or the saved state clears the "unsaved changes" flag.
+After File ▸ Save, the current step is marked **[saved]**. Restoring the latest saved state clears the "unsaved changes" flag; restoring an earlier original state after a later save correctly marks the image as changed.
 
 ImageJ's own undo still handles what the history does not cover, such as a selection change on an unedited image, or a paste that is still floating.
 
@@ -119,7 +119,15 @@ Recording applies to operations represented by history steps. Some interactive o
 
 A single click selects rows without changing the image. Shift selects a range; Cmd-click on macOS / Ctrl-click on Windows and Linux selects separate rows. Right-clicking within a selection preserves it; right-clicking outside selects the clicked row. Empty space has no step menu.
 
-**Preview** displays a detached snapshot in its own viewer without adding a tracked image or restoring shared Results or ROI Manager data. Channel, slice and frame controls appear when needed. Rendering and navigation run in the background, and the private image is released when the preview closes. **Restore** or a double-click explicitly restores a state in the working image. **Open image** creates a separate editable copy.
+**Preview** displays a detached snapshot in its own viewer without adding a tracked image or restoring shared Results or ROI Manager data. Channel, slice and frame controls appear when needed. Rendering and navigation run in the background, and the private image is released when the preview closes. **Go to step** or a double-click restores the selected state in the working image. **Open copy** creates a separate editable copy. These selected-step actions are separate from **Reset image**, above the list.
+
+### Reset image and button appearance
+
+Above the list, **Reset image** offers **Original tracked state** or **Last saved state**. Press **Restore** to apply that reference, independently of selected rows. Original means the state when tracking began, which may already include edits if tracking started late. Last saved means the latest save observed during this session, or the opened file state before its first later save. A new unsaved image has no saved reference yet; choosing that target explains why Restore is unavailable.
+
+Both references survive clearing history, explicit deletion and discarded redo branches. They share unchanged pixel planes with the history instead of making redundant copies, but retaining old reference pixels still uses the configured memory or disk budget. They remain session data, not a backup on disk. A restored reference whose row was removed becomes a new, explicitly named restore point; a retained reference is revisited without discarding available redo steps. Reference restoration is not represented as an invented macro instruction.
+
+**Settings… ▸ Button appearance** offers **Icons and text** (default), **Text only**, and **Icons only**. Tooltips and accessible names remain available in every mode. The choice is remembered. Navigation and reset sit above the history, selected-step actions sit below it, and macro recording has its own row. **Clear history…** is in Settings and requires confirmation.
 
 ### Batch deletion and ranges
 
@@ -127,7 +135,7 @@ A single click selects rows without changing the image. Shift selects a range; C
 
 **Delete** accepts multiple selected rows. The confirmation states how many restore points and protected checkpoints are selected and whether the current state must move. The baseline is always retained. If the current state is selected, the image first restores the nearest earlier retained state; cancellation or failure leaves the selected restore points in place. The full selection is resolved before any snapshot is removed. If the current state or selected rows change while confirmation is open, the action is rejected for review.
 
-Deleting a restore point does **not** remove that operation’s effects from later snapshots. Explicit deletion is permanent and frees snapshot storage that is not shared with retained states. Keep protects checkpoints from automatic trimming, not from a confirmed explicit deletion. The recycle-bin idea is not part of this version.
+Deleting a restore point does **not** remove that operation’s effects from later snapshots. Explicit deletion is permanent and frees snapshot storage that is not shared with retained states or the original and saved references. Keep protects checkpoints from automatic trimming, not from a confirmed explicit deletion. The recycle-bin idea is not part of this version.
 
 The right-click menu also offers **Delete steps before this** and **Delete steps after this**. Both exclude the clicked anchor; the before range also excludes the baseline. The same summary and restore rules apply.
 
@@ -289,3 +297,7 @@ Validated with 101 history integration checks, 11 macro unit checks and 6 interf
 ## Development version 1.4.0-dev1
 
 Adds batch and range deletion, context actions, detached stack-aware previews, notes, stable named checkpoints, macro inclusion comments, range exports and the Record macro checkbox. Build with `./package.sh`; `./test-controls.sh` exercises the new workflow in an isolated ImageJ. The accepted Window Layouts zoom implementation is unchanged.
+
+## Version 1.5.0-dev1
+
+Native Histogram, Plot and custom image-backed tool windows are excluded from pixel history. Ordinary ImageJ image and stack windows retain history support. The panel separates reference restoration from selected-step navigation, preserves original and latest saved references, and supports three button appearance modes. `./test-references.sh` tests reset behavior, actual TIFF saves, deletion, clear, redo branching, appearance and reference storage cleanup in an isolated ImageJ.
