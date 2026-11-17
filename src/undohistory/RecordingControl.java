@@ -9,10 +9,14 @@ import java.awt.EventQueue;
 final class RecordingControl {
     private static final String PREF = Engine.PREF + "recordMacro";
     private static Recorder owned;
-    static boolean enabled() { return Prefs.get(PREF, false); }
+    static boolean enabled() { return Prefs.get(PREF, true); }
 
     static void start() {
-        if (enabled()) EventQueue.invokeLater(() -> setEnabled(true));
+        if (!enabled()) return;
+        if (EventQueue.isDispatchThread()) setEnabled(true);
+        else try { EventQueue.invokeAndWait(() -> setEnabled(true)); }
+        catch (InterruptedException ex) { Thread.currentThread().interrupt(); throw new IllegalStateException("Macro recorder startup interrupted",ex); }
+        catch (java.lang.reflect.InvocationTargetException ex) { throw new IllegalStateException("Could not start macro recorder",ex.getCause()); }
     }
 
     /** Must run on the event thread so native Recorder controls are created safely. */
@@ -32,6 +36,7 @@ final class RecordingControl {
         } else if (!enabled && owned != null && owned == Recorder.getInstance() && !owned.isVisible()) {
             owned.close(); owned = null;
         }
+        MacroCapture.resetFeed();
         Prefs.savePreferences();
         return enabled;
     }

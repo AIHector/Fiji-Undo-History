@@ -26,18 +26,19 @@ public final class UsabilityTest {
     public static void main(String[] args) throws Exception {
         try {
             Prefs.set(Engine.PREF + "testMemoryMB", 64); Prefs.set(Engine.PREF + "useDisk", false);
-            new ImageJ(ImageJ.NO_SHOW); new Undo_History().run("start"); engine = Engine.get();
+            new ImageJ(ImageJ.NO_SHOW); Prefs.set(Engine.PREF+"recordMacro",false); new Undo_History().run("start"); engine = Engine.get();
             ByteProcessor bp = new ByteProcessor(100, 100);
             for (int i = 0; i < 10000; i++) bp.set(i, (i * 17) % 256);
             ImagePlus imp = new ImagePlus("History selection and macro test", bp); imp.show();
             waitFor(() -> engine.view(imp.getID()) != null);
+            EventQueue.invokeAndWait(() -> RecordingControl.setEnabled(true));
             IJ.run(imp, "Invert", ""); IJ.run(imp, "Gaussian Blur...", "sigma=2.75");
             waitFor(() -> engine.view(imp.getID()).rows.size() == 3);
             EventQueue.invokeAndWait(HistoryWindow::showWindow);
             HistoryWindow history = null;
             for (Window w : Window.getWindows()) if (w instanceof HistoryWindow) history = (HistoryWindow) w;
             final HistoryWindow panel = history;
-            JList<?> list = (JList<?>) field(panel, "list");
+            HistoryTable list = (HistoryTable) field(panel, "list");
             JButton go = (JButton) field(panel, "go"), macro = (JButton) field(panel, "macro");
             JButton copy = (JButton) field(panel, "copy"), delete = (JButton) field(panel, "delete");
             byte[] current = ((byte[]) imp.getProcessor().getPixels()).clone();

@@ -47,7 +47,7 @@ public class GuiTest {
 		Prefs.set(Engine.PREF + "replaceUndo", true);
 		Prefs.set(Engine.PREF + "trimOnSave", false);
 		new ImageJ(ImageJ.NO_SHOW);
-		Prefs.set(Engine.PREF + "recordMacro", true);
+		Prefs.set(Engine.PREF + "recordMacro", false);
 		new Undo_History().run("start");
 		engine = Engine.get();
 
@@ -676,6 +676,7 @@ public class GuiTest {
 		ImagePlus mx = new ImagePlus("macro-export-test", noise(96, 96, 71));
 		mx.show(); waitFor(() -> rows(mx) == 1, 5000);
 		EventQueue.invokeAndWait(() -> {
+			Prefs.set(Engine.PREF + "recordMacro", true);
 			Prefs.set("recorder.mode", "Macro");
 			new ij.plugin.frame.Recorder();
 		});

@@ -22,6 +22,7 @@ final class MacroExport {
         text.append('\n');
         for (Engine.Row row : rows) {
             text.append("// ").append(row.included ? "" : "[excluded] ").append(oneLine(row.label)).append('\n');
+            if(row.shared)text.append("// Shared context: replaying this changes a shared setting; image Undo does not reset it.\n");
             if (!row.note.isEmpty()) comment(text, "Note: " + row.note);
             if (!row.included) {
                 if (row.macroCode != null) comment(text, row.macroCode);

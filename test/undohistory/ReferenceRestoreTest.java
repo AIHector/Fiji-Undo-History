@@ -55,7 +55,7 @@ public final class ReferenceRestoreTest {
         for(Window w:Window.getWindows())if(w instanceof HistoryWindow)found=(HistoryWindow)w;
         final HistoryWindow window=found;
         JButton restore=(JButton)field(window,"restore"),go=(JButton)field(window,"go"),settings=(JButton)field(window,"options");
-        JComboBox<?> target=(JComboBox<?>)field(window,"referenceTarget");JList<?> list=(JList<?>)field(window,"list");
+        JComboBox<?> target=(JComboBox<?>)field(window,"referenceTarget");HistoryTable list=(HistoryTable)field(window,"list");
         waitFor(restore::isEnabled);
         check(go.isEnabled()&&restore.isEnabled(),"original reset and Go to step are available without selecting an older row");
         EventQueue.invokeAndWait(()->target.setSelectedIndex(1));
@@ -66,7 +66,7 @@ public final class ReferenceRestoreTest {
         waitFor(()->engine.view(id).hasSaved);pause(250);
         check(engine.view(id).rows.get(1).saved,"successful save supplies saved reference");
         command(image,"Find Edges",3);byte[] edited=pixels(image);
-        waitFor(()->list.getModel().getSize()==3);
+        waitFor(()->list.getModel().getRowCount()==3);
         EventQueue.invokeAndWait(()->list.setSelectionInterval(0,2));
         check(restore.isEnabled()&&!go.isEnabled(),"multi-selection does not disable original reset");
         EventQueue.invokeAndWait(restore::doClick);waitFor(()->Arrays.equals(original,pixels(image)));pause(500);

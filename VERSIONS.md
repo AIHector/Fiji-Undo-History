@@ -12,7 +12,9 @@ The current implementation remains on `main`. Missing historical checkpoints wer
 | [v1.3.0-dev1](https://github.com/AIHector/Fiji-Undo-History/tree/v1.3.0-dev1) | [48d0c97](https://github.com/AIHector/Fiji-Undo-History/commit/48d0c972d736874b82df63951732658d5d31acb2) | historical macro creation candidate; superseded |
 | [v1.3.0](https://github.com/AIHector/Fiji-Undo-History/tree/v1.3.0) | [1cc396e](https://github.com/AIHector/Fiji-Undo-History/commit/1cc396eba5db4686399d512eaea2e2c1e8663c02) | accepted selected-step macro creation |
 | [v1.4.0-dev1](https://github.com/AIHector/Fiji-Undo-History/tree/v1.4.0-dev1) | [f84d94d](https://github.com/AIHector/Fiji-Undo-History/commit/f84d94db56afdaac4c38332e125dede4f7113d9e) | batch/context history actions and recording controls |
-| [v1.5.0-dev1](https://github.com/AIHector/Fiji-Undo-History/tree/v1.5.0-dev1) | [686835e](https://github.com/AIHector/Fiji-Undo-History/commit/686835e036eeb26b52aede5615b730f68a6f75b2) | current installed reference reset and control layout |
+| [v1.5.0-dev1](https://github.com/AIHector/Fiji-Undo-History/tree/v1.5.0-dev1) | [686835e](https://github.com/AIHector/Fiji-Undo-History/commit/686835e036eeb26b52aede5615b730f68a6f75b2) | previous installed reference reset and control layout |
+
+| [v1.6.0-dev1](https://github.com/AIHector/Fiji-Undo-History/tree/v1.6.0-dev1) | version tag | current installed history table, image-scoped macro journal, shared context, previews/export and configurable toolbar |
 
 ## Alternative or same-number snapshots
 
@@ -30,3 +32,7 @@ These tags distinguish different implementations that shared a VERSION value. Th
 3. Preserve the currently installed plugin jar and startup macro, then replace them with the chosen build and reopen Fiji. Keep your image files and preferences. Companion plugins have independent version tags.
 
 For a recently installed development version, an exact local jar/settings backup can also be restored with Fiji closed. Switching a Git tag alone does not change an installed Fiji.
+
+## 1.6.0-dev1
+
+Adds the configurable history table, default-on macro capture, source-image routing, separately labelled shared context, output-based preview reuse, image/icon export and a configurable single-row overflow toolbar. The v1.6.0-dev1 source tag preserves this tested development checkpoint; the v1.5.0-dev1 tag is unchanged. Source tags do not change an installed version by themselves. Existing explicit recorder preferences are respected. Rolling back means replacing the installed plugin with the preserved tested 1.5.0-dev1 binary while Fiji is closed; checking out a source tag alone does not change installed Fiji.

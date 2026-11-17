@@ -31,7 +31,7 @@ ImageJ 1.x, the engine underneath Fiji, keeps one undo buffer. Undo reverts only
 | Feature | What you get |
 |---|---|
 | **Undo as far back as you need** | **⌘Z** / **Ctrl+Z** steps back again and again; **⌘⌥Z** / **Ctrl+Alt+Z** steps forward |
-| **A panel with every step** | double-click any step to go back to it; copy a step as a new image to compare before and after |
+| **A configurable history table** | Move, sort, resize, show or hide columns; inspect image previews; copy exact recorded macro code; export retained image states |
 | **More than pixels** | selections, overlays, display range and LUTs, calibration, the ROI Manager list and the Results table are steps too |
 | **Closed by mistake?** | *Reopen Closed Image* brings an image back with its whole history |
 | **Light on memory** | a step that changes no pixels shares the planes of the step before; older steps move to disk when the memory budget is full; the budget and the disk folder are settings |
@@ -87,7 +87,7 @@ Each of these counts as one step:
 - each `run("…")` call inside a macro
 - each brush, pencil or flood-fill stroke (one per mouse press)
 - an "Apply" from a tool window such as Brightness/Contrast
-- a change that touches no pixels: a selection drawn, moved or removed ("Selection"), an overlay edit (Add Selection, Remove Overlay, labels...), the display range or LUT ("Display"), the calibration (Set Scale, Properties...), the ROI Manager's list ("ROI Manager", also from its own buttons) and the Results table (Measure, Clear Results...). Such a step shares all its pixels with the step before, so it costs only the part that changed. A run of selection changes, or of display changes, is merged into one step.
+- a change that touches no pixels: a selection drawn, moved or removed ("Selection"), an overlay edit (Add Selection, Remove Overlay, labels...), the display range or LUT ("Display"), the calibration (Set Scale, Properties...), the ROI Manager's list ("ROI Manager", also from its own buttons) and the Results table (Measure, Clear Results...). Such a step shares all its pixels with the step before, so it costs only the part that changed. With macro recording enabled, settled selection and display changes remain distinct so their recorded instructions are not overwritten. With recording off, consecutive unannotated selection or display changes can merge into one step.
 
 In the window, `▶` marks the current state, and grey italic rows are steps you can redo. If you undo and then make a new change, the redo steps are discarded, the same as in any editor.
 
@@ -95,31 +95,57 @@ After File ▸ Save, the current step is marked **[saved]**. Restoring the lates
 
 ImageJ's own undo still handles what the history does not cover, such as a selection change on an unedited image, or a paste that is still floating.
 
+## History table, previews and toolbar (1.6.0 development)
+
+The main area contains **Number**, **Step**, **Macro**, **Preview**, **Time** and **Dimension** columns. Drag a column header to move it, drag its edge to resize it, and click to cycle its sort order. All columns except Preview can sort ascending or descending. Right-click the headers, or open Settings → Columns, to show or hide columns. At least one column remains visible. Column order, widths, visibility and sort keys persist between windows and sessions.
+
+Numbers identify image-history steps from the original tracked state. Deletion leaves gaps rather than renumbering surviving steps. The column menu can instead show numbers relative to the latest saved reference: that reference is zero, earlier steps have negative numbers. Shared-context rows have no image-step number. Sorting changes the display only: Undo, Redo, range operations and exported macro instructions keep their chronological meaning and stable image/step identities.
+
+Single-clicking selects rows without restoring pixels. Double-click Step, Number, Time or Dimension to restore an image state; double-click Macro to inspect/export its code, or Preview to open the detached preview. Right-click an image row for its actions. The first context-menu item is **Export image at this step**:
+
+- **TIFF** preserves the full retained image/stack, its numerical bit depth and dimensions.
+- **PNG**, **JPEG**, **BMP** and **GIF** export the rendered captured plane, including display appearance. These are display exports, not substitutes for scientific numerical data. JPEG is lossy and GIF uses a limited palette.
+- **ICO** exports a standard PNG-backed icon at 32, 64, 128 or 256 pixels, with transparent padding as needed.
+
+Small image-output previews are enabled by default. Hover over one to enlarge it. A preview is generated when the image data or display changes; unchanged output reuses the existing bitmap, including after selection-only changes and recorded Copy operations. Shared settings have no separate image snapshot or preview. Turning **Image previews** off in Settings (or the history-options dialog) clears the cache and reduces row height. It does not remove the full-resolution snapshots required for Undo. Previews are session-only memory caches and are not separate files on disk; the existing disk-storage option controls storage of full snapshots.
+
+The upper toolbar uses one row. **>>** exposes actions that do not fit and always offers **Customize toolbar…**. Right-click the toolbar to customize it too: insert or hide actions, move them left or right, rename button labels, and add or remove separators. These choices persist. Settings retains the text-only, icons-only and combined appearances. The recording checkbox, Recorder button and storage information remain at the bottom.
+
+### Per-image recording and shared context
+
+The native Recorder contains a session-wide stream. Undo History routes ordinary operations to their source image at command/activation boundaries and also interprets recorded image-selection instructions. Selecting a different image changes the history being shown; `selectImage`/`selectWindow` routing lines do not become image-edit steps. A tool receiving focus does not itself change the last ordinary source image. Instructions whose explicit image target no longer exists are not reassigned to another image.
+
+Recorded actions that do not change tracked image data can still have their own rows, marked **[recorded action]**. They share the retained image snapshot and preview. Restoring that row restores the image state; it does not undo external effects such as files written or clipboard changes.
+
+Recognized shared settings appear as **[shared context]** in the histories of all images open when the setting is captured. They can be copied/exported, and Settings can hide these context rows. They do not move image cursors, create image restore points, or clear Redo branches; Go to step and image-export actions do not apply to them. Macro export labels the setting as shared context. The shared-context list retains up to 512 recent entries for the session. Current recognized cases are foreground/background colour, tool selection, selected global `setOption` values, and the native Set Measurements, Conversions, Colors and Line Width dialogs. Image-local options such as `setOption("Changes", ...)` remain local; unknown plugin settings are not guessed to be global.
+
+Recorder code must exist at capture time. Closing the Recorder, disabling history recording or switching its language stops capture according to the existing checkbox policy. Editing/replacing Recorder text establishes a new capture boundary; earlier text is not imported as fresh actions. A plugin that emits no recorder code cannot have its parameters reconstructed from its name. Concurrent background plugins that emit unscoped Recorder text can exceed the Recorder's attribution guarantees; this version does not claim a universal audit trail for arbitrary plugin internals. Image snapshots and recorder instructions serve different purposes, and missing code remains visible rather than being synthesized from defaults.
+
 ## Turn selected history steps into a macro
 
 This development version can create a reusable ImageJ macro from selected history operations.
 
-1. Tick **Record macro** in the Undo History window before performing operations you want to reuse. Recording can remain in the background. **Recorder…** shows ImageJ’s recorder if you want to inspect its text; keep its recording language set to **Macro**.
-2. Work on a test image. Steps with captured code are marked **[macro]**. Commands run by an ImageJ macro with an explicit option string can retain that string while history recording is enabled.
+1. **Record macro is enabled by default** for new preferences. Existing explicit choices are retained; tick it if you previously disabled it. Recording can remain in the background. **Recorder…** shows ImageJ’s recorder if you want to inspect its text; keep its recording language set to **Macro**.
+2. Work on a test image. The **Macro** column shows captured code, including exact recorded option values. Commands run by an ImageJ macro with an explicit option string can retain that string while history recording is enabled.
 3. Select the operation rows to export. Use Shift for a range, or Cmd-click on macOS / Ctrl-click on Windows and Linux for separate rows. Selecting rows leaves the image unchanged. The first row is a baseline image, not an operation. The panel automatically leaves it out of selected-operation exports.
 4. Press **Create macro…** to preview the code in history order, then **Save macro…** to save an `.ijm` file. Exporting does not run the macro.
 5. Open the saved file in Fiji’s macro editor. Review selections, channels, file paths and omitted-step dependencies, then try it on a duplicate of a suitable input image. Add the saved file to Side Toolbar’s macro shelf if desired.
 
-**What can be recovered.** Code must have been captured when an operation was performed. Earlier history labels cannot recover settings retrospectively. Brush strokes, adjustment windows, interactive selections and third-party plugins without recorded code are marked as missing. A draft with missing code contains a stop before all operations and TODO comments, so it does not quietly run an incomplete workflow. Repeat the missing operations with recording enabled, or complete the code in the editor before removing the stop.
+**What can be recovered.** Code must have been captured when an operation was performed. Earlier history labels cannot recover settings retrospectively. Brush strokes and third-party plugins without recorded code are marked as missing. Interactive selections and adjustment tools retain the instructions they actually emit to the native Recorder; unsupported operations remain explicit missing-code steps. A draft with missing code contains a stop before all operations and TODO comments, so it does not quietly run an incomplete workflow. Repeat the missing operations with recording enabled, or complete the code in the editor before removing the stop.
 
 Recorded settings do not guarantee identical results on different images. A selected filter can depend on an earlier selection, channel, display threshold, measurement setting or intermediate step that was not selected. The export flags gaps in the selected history, but cannot infer every dependency. Plugin commands may also depend on external files or installed plugins. Code is kept with the in-session history; it is not recovered from an old release or stored as a persistent project.
 
 ### Recording checkbox
 
-**Record macro** is off by default and is remembered between launches. Ticking it creates a background native Macro Recorder if needed. Unticking stops attaching code to new history steps and preserves code already captured. A hidden recorder created by this plugin is closed when recording stops; an independently opened or visible Recorder is left intact, and can continue recording separately. Closing the Recorder or switching it to a different language turns off history capture when the panel refreshes.
+**Record macro** is on by default for new preferences; an explicit saved choice is remembered between launches. Ticking it creates a background native Macro Recorder if needed. Unticking stops attaching code to new history steps and preserves code already captured. A hidden recorder created by this plugin is closed when recording stops; an independently opened or visible Recorder is left intact, and can continue recording separately. Closing the Recorder or switching it to a different language turns off history capture when the panel refreshes.
 
-Recording applies to operations represented by history steps. Some interactive operations and commands that produce no tracked state may not have associated code. The existing missing-code and dependency warnings still apply; the checkbox does not reconstruct earlier instructions retrospectively.
+Recording includes image-changing steps, emitted image-local actions with unchanged data, and recognized shared-context settings. Interactive operations and plugins that do not emit code can still have missing code. The existing missing-code and dependency warnings still apply; the checkbox does not reconstruct earlier instructions retrospectively.
 
 ### Select, preview and restore
 
 A single click selects rows without changing the image. Shift selects a range; Cmd-click on macOS / Ctrl-click on Windows and Linux selects separate rows. Right-clicking within a selection preserves it; right-clicking outside selects the clicked row. Empty space has no step menu.
 
-**Preview** displays a detached snapshot in its own viewer without adding a tracked image or restoring shared Results or ROI Manager data. Channel, slice and frame controls appear when needed. Rendering and navigation run in the background, and the private image is released when the preview closes. **Go to step** or a double-click restores the selected state in the working image. **Open copy** creates a separate editable copy. These selected-step actions are separate from **Reset image**, above the list.
+**Preview** displays a detached snapshot in its own viewer without adding a tracked image or restoring shared Results or ROI Manager data. Channel, slice and frame controls appear when needed. Rendering and navigation run in the background, and the private image is released when the preview closes. **Go to step**, or double-clicking a state outside its Macro/Preview cells, restores the selected state in the working image. **Open copy** creates a separate editable copy. These selected-step actions are separate from **Reset image**, above the list.
 
 ### Reset image and button appearance
 
@@ -127,7 +153,7 @@ Above the list, **Reset image** offers **Original tracked state** or **Last save
 
 Both references survive clearing history, explicit deletion and discarded redo branches. They share unchanged pixel planes with the history instead of making redundant copies, but retaining old reference pixels still uses the configured memory or disk budget. They remain session data, not a backup on disk. A restored reference whose row was removed becomes a new, explicitly named restore point; a retained reference is revisited without discarding available redo steps. Reference restoration is not represented as an invented macro instruction.
 
-**Settings… ▸ Button appearance** offers **Icons and text** (default), **Text only**, and **Icons only**. Tooltips and accessible names remain available in every mode. The choice is remembered. Navigation and reset sit above the history, selected-step actions sit below it, and macro recording has its own row. **Clear history…** is in Settings and requires confirmation.
+**Settings… ▸ Button appearance** offers **Icons and text** (default), **Text only**, and **Icons only**. Tooltips and accessible names remain available in every mode. The choice is remembered. Navigation, reset and selected-step actions share the configurable toolbar above the history; macro recording retains its own row below it. **Clear history…** is in Settings and requires confirmation.
 
 ### Batch deletion and ranges
 
@@ -301,3 +327,11 @@ Adds batch and range deletion, context actions, detached stack-aware previews, n
 ## Version 1.5.0-dev1
 
 Native Histogram, Plot and custom image-backed tool windows are excluded from pixel history. Ordinary ImageJ image and stack windows retain history support. The panel separates reference restoration from selected-step navigation, preserves original and latest saved references, and supports three button appearance modes. `./test-references.sh` tests reset behavior, actual TIFF saves, deletion, clear, redo branching, appearance and reference storage cleanup in an isolated ImageJ.
+
+## Version 1.6.0-dev1
+
+Adds the table, source-scoped recorder journal, shared context, preview caching and image/icon export described above, plus the configurable overflow toolbar.
+
+### Table and source-scope checks
+
+`./test-table.sh` tests fresh recording defaults, unchanged-image commands, all column controls, sorted restoration/export, preview hover, cache toggling, image/icon export, toolbar customization and persistence. `./test-image-scope.sh` tests two-image routing, rapid recorder selection changes, shared-context isolation from Undo/Redo, preview reuse, and displayed-plane changes. Both use fresh temporary preferences and in-process component events; they do not send physical keyboard/mouse input or modify the installed plugin. They complement the existing snapshot, macro, controls and reference-state suites. Physical input, multiple monitors, Windows and Linux still require separate validation.

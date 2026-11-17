@@ -34,6 +34,8 @@ public final class MacroTests {
         check(comments.code.contains("// run(\"Invert\");"), "all lines of excluded code are comments");
         check(comments.code.contains("// run(\"Delete\");"), "notes cannot inject executable lines");
         check(comments.code.contains("[excluded]"), "exclusions remain explicit in exported recipe");
+        check(MacroCapture.instructions("print(\"unfinished;",false).isEmpty(),"partial recorder appends are not treated as executable instructions");
+        check(MacroCapture.instructions("print(\"complete; string\");\n",false).size()==1,"completed quoted instruction is emitted intact");
         System.out.println(pass + " macro unit checks passed");
     }
 }

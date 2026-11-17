@@ -31,8 +31,8 @@ public final class HistoryControlsTest {
             throw ex;
         }
     }
-    static void popup(JList<?> list,int index)throws Exception{
-        EventQueue.invokeAndWait(()->{Rectangle r=list.getCellBounds(index,index);list.dispatchEvent(new MouseEvent(list,MouseEvent.MOUSE_PRESSED,
+    static void popup(HistoryTable list,int index)throws Exception{
+        EventQueue.invokeAndWait(()->{Rectangle r=list.getCellRect(list.convertRowIndexToView(index),0,true);list.dispatchEvent(new MouseEvent(list,MouseEvent.MOUSE_PRESSED,
                 System.currentTimeMillis(),InputEvent.BUTTON3_DOWN_MASK,12,r.y+r.height/2,1,true,MouseEvent.BUTTON3));
             list.dispatchEvent(new MouseEvent(list,MouseEvent.MOUSE_RELEASED,System.currentTimeMillis()+1,0,
                     12,r.y+r.height/2,1,false,MouseEvent.BUTTON3));});
@@ -55,7 +55,7 @@ public final class HistoryControlsTest {
         EventQueue.invokeAndWait(HistoryWindow::showWindow);HistoryWindow panel=null;
         for(Window window:Window.getWindows())if(window instanceof HistoryWindow)panel=(HistoryWindow)window;
         final HistoryWindow history=panel;
-        JCheckBox recording=(JCheckBox)field(history,"recordMacro");JList<?> list=(JList<?>)field(history,"list");
+        JCheckBox recording=(JCheckBox)field(history,"recordMacro");HistoryTable list=(HistoryTable)field(history,"list");
         JButton preview=(JButton)field(history,"preview"),restore=(JButton)field(history,"go"),delete=(JButton)field(history,"delete");
         check(!recording.isSelected(),"recording checkbox starts off");
         EventQueue.invokeAndWait(recording::doClick);
@@ -87,7 +87,7 @@ public final class HistoryControlsTest {
         check(engine.cursorOf(image.getID())==cursor&&Arrays.equals(working,pixels(image))&&Analyzer.getResultsTable().size()==results,
                 "preview construction leaves pixels, cursor and shared Results unchanged");
         check(engine.trackedImages()==tracked&&WindowManager.getImageCount()==open,"detached preview does not add a tracked image");
-        waitFor(()->list.getModel().getSize()==6);EventQueue.invokeAndWait(()->list.setSelectedIndex(1));EventQueue.invokeAndWait(preview::doClick);
+        waitFor(()->list.getModel().getRowCount()==6);EventQueue.invokeAndWait(()->list.setSelectedIndex(1));EventQueue.invokeAndWait(preview::doClick);
         final JFrame[] previewFrame={null};waitFor(()->{for(Window window:Window.getWindows())if(window instanceof JFrame&&String.valueOf(((JFrame)window).getTitle()).startsWith("History preview"))previewFrame[0]=(JFrame)window;return previewFrame[0]!=null;});
         check(engine.cursorOf(image.getID())==cursor&&Arrays.equals(working,pixels(image)),"Preview button shows snapshot without restoration");EventQueue.invokeAndWait(()->previewFrame[0].dispose());
         waitFor(restore::isEnabled);EventQueue.invokeAndWait(restore::doClick);waitFor(()->engine.cursorOf(image.getID())==1);

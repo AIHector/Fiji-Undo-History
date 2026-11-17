@@ -19,6 +19,7 @@ import java.util.List;
 final class Snapshot {
 
 	final int width, height, bitDepth;
+	final int displayPlane;
 	final int nChannels, nSlices, nFrames;
 	final Plane[] planes;
 	final String[] labels;
@@ -35,6 +36,7 @@ final class Snapshot {
 	final boolean metaOnly;
 
 	private Snapshot(ImagePlus imp, Plane[] planes, String[] labels, Snapshot prev, Extras extras, boolean metaOnly) {
+		displayPlane = imp.getCurrentSlice();
 		this.extras = extras;
 		this.metaOnly = metaOnly;
 		width = imp.getWidth();
@@ -115,7 +117,7 @@ final class Snapshot {
 		Extras ex = Extras.capture(imp, prev == null ? null : prev.extras);
 		if (!changed) {
 			// same pixels: a step only if the selection, overlay, display, ROI Manager or Results changed
-			if (prev == null || ex.changeFrom(prev.extras) == null) return null;
+			if (prev == null || ex.changeFrom(prev.extras) == null && (!RecordingControl.enabled() || prev.displayPlane == imp.getCurrentSlice())) return null;
 			return new Snapshot(imp, prev.planes, prev.labels, prev, ex, true);
 		}
 		return new Snapshot(imp, planes, labels, prev, ex, false);
@@ -131,7 +133,7 @@ final class Snapshot {
 				&& prev.height == imp.getHeight() && prev.bitDepth == imp.getBitDepth();
 		if (!sameShape) return null;
 		Extras ex = Extras.capture(imp, prev.extras);
-		if (ex.changeFrom(prev.extras) == null) return null;
+		if (ex.changeFrom(prev.extras) == null && (!RecordingControl.enabled() || prev.displayPlane == imp.getCurrentSlice())) return null;
 		return new Snapshot(imp, prev.planes, prev.labels, prev, ex, true);
 	}
 
@@ -139,6 +141,41 @@ final class Snapshot {
 	String metaChange(Snapshot prev) {
 		return prev == null ? null : extras.changeFrom(prev.extras);
 	}
+
+    /** The thumbnail is image output: selections, notes and shared settings do not require a new bitmap. */
+    boolean sameDisplay(Snapshot previous) {
+        if(previous==null||width!=previous.width||height!=previous.height||bitDepth!=previous.bitDepth
+            ||displayPlane!=previous.displayPlane||min!=previous.min||max!=previous.max||compositeMode!=previous.compositeMode
+            ||!java.util.Arrays.equals(activeChannels,previous.activeChannels)||planes.length!=previous.planes.length)return false;
+        if(planes!=previous.planes)for(int i=0;i<planes.length;i++)if(planes[i]!=previous.planes[i])return false;
+        if(lut!=null?(previous.lut==null||!java.util.Arrays.equals(lut.getBytes(),previous.lut.getBytes())):previous.lut!=null)return false;
+        if(luts!=null){if(previous.luts==null||luts.length!=previous.luts.length)return false;for(int i=0;i<luts.length;i++)if(luts[i].min!=previous.luts[i].min||luts[i].max!=previous.luts[i].max||!java.util.Arrays.equals(luts[i].getBytes(),previous.luts[i].getBytes()))return false;}
+        return true;
+    }
+
+    /** Materialize only the captured display plane for the optional thumbnail cache. */
+    ImagePlus previewPlane(Store store) throws IOException {
+        int index = Math.max(0, Math.min(planes.length - 1, displayPlane - 1));
+        if (luts != null && nChannels > 1) {
+            ImageStack stack = new ImageStack(width,height);
+            int base = index / nChannels * nChannels;
+            for (int c=0;c<nChannels;c++) stack.addSlice(processor(store.materialize(planes[base+c])));
+            ImagePlus image = new ImagePlus("History thumbnail",stack);image.setDimensions(nChannels,1,1);
+            CompositeImage composite = new CompositeImage(image,compositeMode);
+            composite.setLuts(luts.clone());setActive(composite,activeChannels);composite.setC(index%nChannels+1);
+            return composite;
+        }
+        ImageProcessor processor = processor(store.materialize(planes[index]));
+        if (lut != null) processor.setLut(lut);
+        if (bitDepth != 24) processor.setMinAndMax(min,max);
+        return new ImagePlus("History thumbnail",processor);
+    }
+    private ImageProcessor processor(Object pixels) {
+        if (pixels instanceof byte[]) return new ij.process.ByteProcessor(width,height,(byte[])pixels,null);
+        if (pixels instanceof short[]) return new ij.process.ShortProcessor(width,height,(short[])pixels,null);
+        if (pixels instanceof float[]) return new ij.process.FloatProcessor(width,height,(float[])pixels);
+        return new ij.process.ColorProcessor(width,height,(int[])pixels);
+    }
 
 	/** Writes this state into {@code imp}, coming from state {@code from}. Caller must hold the engine lock. */
 	void restoreInto(ImagePlus imp, Store store, Snapshot from) throws IOException {
@@ -197,6 +234,7 @@ final class Snapshot {
 				imp.setDisplayRange(min, max);
 			imp.updateAndDraw();
 		}
+        if (imp.getCurrentSlice() != displayPlane) imp.setSlice(Math.max(1,Math.min(displayPlane,imp.getStackSize())));
 	}
 
 	/** A new ImagePlus showing this state (for "Copy"). */

@@ -184,6 +184,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 
 	private final ReentrantLock lock = new ReentrantLock();
 	private final Map<Integer, History> histories = new ConcurrentHashMap<>();
+    private final List<State> sharedContext = new ArrayList<>();
 	private final ConcurrentLinkedQueue<Object[]> pendingOpen = new ConcurrentLinkedQueue<>(); // {ImagePlus, label}
 	private final ConcurrentLinkedQueue<History> pendingClose = new ConcurrentLinkedQueue<>();
 	/** Histories of closed images, most recently closed first. Their memory is the first to be given back. */
@@ -220,6 +221,10 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		}
 		Toolkit.getDefaultToolkit().addAWTEventListener(new AWTEventListener() {
 			public void eventDispatched(AWTEvent e) {
+                if (e.getID() == java.awt.event.WindowEvent.WINDOW_ACTIVATED && e.getSource() instanceof ImageWindow) {
+                    ImagePlus selected = ((ImageWindow)e.getSource()).getImagePlus();
+                    if (supportsHistory(selected)) MacroCapture.observe(selected.getID());
+                }
 				if (e.getID() == MouseEvent.MOUSE_PRESSED) {
 					mouseDown = true;
 					if (e.getSource() instanceof ImageCanvas)
@@ -230,7 +235,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 					if (e.getSource() instanceof ImageCanvas) metaChanged(((ImageCanvas) e.getSource()).getImage(), null);
 				}
 			}
-		}, AWTEvent.MOUSE_EVENT_MASK);
+		}, AWTEvent.MOUSE_EVENT_MASK | AWTEvent.WINDOW_EVENT_MASK);
 		KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(e -> {
 			if (e.getID() != KeyEvent.KEY_PRESSED || e.getKeyCode() != KeyEvent.VK_Z || !redoKey())
 				return false;
@@ -303,6 +308,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	public void imageClosed(ImagePlus imp) {
 		History h = histories.remove(imp.getID());
 		lastViews.remove(imp.getID());
+        MacroCapture.forget(imp.getID());
 		if (h != null) {
 			h.closedAt = System.currentTimeMillis();
 			h.title = imp.getTitle();
@@ -369,6 +375,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		if (isOwnCommand(cmd)) { MacroCapture.invalidate(); return cmd; }
 		lastCommand = cmd;
 		ImagePlus imp = WindowManager.getCurrentImage();
+        MacroCapture.observe(imp == null ? 0 : imp.getID());
 		if (imp != null && imp.getWindow() != null && !histories.containsKey(imp.getID())) {
 			// Opened a moment ago (the "opened" notice may still be on its way): record it before the command runs.
 			lock.lock();
@@ -393,6 +400,8 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 					flush(h); // commit earlier edits (a brush stroke, the previous macro command) as their own step
 				} finally { lock.unlock(); }
 			}
+			lock.lock();
+            try { captureRecorderOnly(h); } finally { lock.unlock(); }
 			h.pendingMacro = MacroCapture.begin(cmd);
 			h.pendingCommand = cmd;
 			h.pendingTool = null;
@@ -450,6 +459,12 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 					markSaved(h);
 				h.lastChanges = changes;
 			}
+            if (!macro && !mouseDown && liveCommandThread() == null) {
+                ImagePlus active = WindowManager.getCurrentImage();
+                MacroCapture.observe(active == null ? 0 : active.getID());
+                captureShared();
+                for (History h : histories.values()) if (!h.dirty && h.threads.isEmpty()) captureRecorderOnly(h);
+            }
 		} finally { lock.unlock(); }
 	}
 
@@ -557,6 +572,8 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		State born = heir.states.get(0);
 		born.label = pretty(heir.createdBy);
 		born.pinned = false;
+		born.number = old.nextNumber++;
+		heir.nextNumber = old.nextNumber;
 		heir.states.clear();
 		heir.states.addAll(old.states);
 		heir.states.add(born);
@@ -645,6 +662,8 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 					h.untracked = "no pixel data";
 				} else {
 					State st = new State(label, s);
+					st.number = h.nextNumber++;
+					st.thumbnail = Thumbnail.capture(imp);
 					st.pinned = true;
 					st.clean = !imp.changes;
 					h.states.add(st);
@@ -712,6 +731,12 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		}
 		lastCaptureMs = (System.nanoTime() - t0) / 1e6;
 		String macroCode = h.pendingCommand == null ? null : MacroCapture.finish(h.pendingMacro);
+		long codeOrder = h.pendingMacro == null ? MacroCapture.nextOrder() : h.pendingMacro.order;
+        String recorded = MacroCapture.drain(imp.getID());
+        if(recorded!=null)codeOrder=MacroCapture.consumedOrder(imp.getID(),0);
+        boolean sharedRecorded = captureShared();
+        if (macroCode != null && MacroCapture.isShared(macroCode)) { if (!sharedRecorded) addShared(macroCode,codeOrder); macroCode = null; }
+		if (recorded != null) macroCode = recorded;
 		h.pendingMacro = null;
 		boolean fromCommand = h.pendingCommand != null;
 		String label = h.pendingCommand != null ? pretty(h.pendingCommand)
@@ -719,36 +744,113 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		h.pendingCommand = null;
 		h.pendingMacro = null;
 		h.pendingTool = null;
-		if (s == null) { noChangeCaptures++; return; }
+		boolean unchanged = s == null;
+		if (unchanged && macroCode == null) { noChangeCaptures++; return; }
+		if (unchanged) s = cur.snap;
 		if (s.metaOnly && !fromCommand) {
 			// no pixels changed and no command ran: name the step after what changed
 			String what = s.metaChange(cur.snap);
 			if (what != null) label = what;
+            if(macroCode!=null)label=MacroCapture.describe(macroCode);
 		}
 		while (h.states.size() > h.cursor + 1)
 			release(h.states.remove(h.states.size() - 1).snap);
-		if (s.metaOnly && (label.equals("Selection") || label.equals("Display")) && h.cursor > 0
+		if (macroCode == null && !RecordingControl.enabled() && s.metaOnly && (label.equals("Selection") || label.equals("Display")) && h.cursor > 0
 				&& cur.snap.metaOnly && cur.label.equals(label) && !cur.pinned && !cur.saved
 				&& cur.label.equals(cur.originalLabel) && cur.note.isEmpty() && cur.included) {
 			// a run of selection (or display) changes is one step: the latest replaces the previous one
 			retain(s, System.currentTimeMillis());
 			release(cur.snap);
 			State st = new State(label, s);
+			st.number = cur.number;
+			st.thumbnail = Thumbnail.enabled() && s.sameDisplay(cur.snap) ? cur.thumbnail : Thumbnail.capture(imp);
 			st.clean = cur.clean && !imp.changes;
 			h.states.set(h.cursor, st);
 			fireChanged();
 			return;
 		}
 		State st = new State(label, s);
+		st.number = h.nextNumber++;
+		st.order = codeOrder;
 		st.macroCode = macroCode;
+		st.recorderOnly = unchanged;
+		st.thumbnail = Thumbnail.enabled() && s.sameDisplay(cur.snap) ? cur.thumbnail : Thumbnail.capture(imp);
 		// a selection, display or ROI Manager change leaves the image as saved, as in ImageJ (no "Save changes?")
-		if (s.metaOnly) st.clean = cur.clean && !imp.changes;
+		if (s.metaOnly || unchanged) st.clean = cur.clean && !imp.changes;
 		h.states.add(st);
 		h.cursor = h.states.size() - 1;
 		retain(s, st.time);
 		enforceStepLimit(h);
 		fireChanged();
 	}
+
+    /** Preserve recorder-only operations without duplicating image planes or claiming external effects are undoable. */
+    private void captureRecorderOnly(History h) {
+        if (h.untracked != null || h.states.isEmpty() || h.restoring || !h.restoreSettled || h.dirty) return;
+        String code = MacroCapture.drain(h.imp.getID());
+        captureShared();
+        if (code == null) return;
+        State cur = h.states.get(h.cursor);
+        while (h.states.size() > h.cursor + 1) release(h.states.remove(h.states.size() - 1).snap);
+        int instructionIndex=0;
+        for (String instruction : MacroCapture.instructions(code)) {
+            State state = new State(MacroCapture.describe(instruction), cur.snap);
+            state.number = h.nextNumber++;
+            state.order = MacroCapture.consumedOrder(h.imp.getID(),instructionIndex++);
+            state.macroCode = instruction.endsWith("\n") ? instruction : instruction + "\n";
+            state.recorderOnly = true;
+            state.clean = cur.clean;
+            state.thumbnail = Thumbnail.enabled() ? cur.thumbnail : null;
+            h.states.add(state); h.cursor = h.states.size() - 1;
+            retain(state.snap, state.time);
+        }
+        enforceStepLimit(h); fireChanged();
+    }
+
+    private boolean captureShared() { java.util.List<MacroCapture.Entry> codes=MacroCapture.drainShared();for(MacroCapture.Entry entry:codes)addShared(entry.code,entry.order);return !codes.isEmpty(); }
+    private void addShared(String code,long order) {
+        if (code.trim().isEmpty()) return;
+        State action = new State(MacroCapture.describe(code),null);
+        action.order = order;
+        action.macroCode = code.endsWith("\n")?code:code+"\n";action.shared=true;
+        for (History h : histories.values()) if (h.original != null) action.audience.add(h.original.key);
+        sharedContext.add(action);
+        if(sharedContext.size()>512)sharedContext.remove(0);
+        fireChanged();
+    }
+
+    void setThumbnails(boolean enabled) {
+        Prefs.set(PREF + "thumbnails", enabled);
+        lock.lock();
+        try {
+            for (History h : histories.values()) clearThumbnails(h);
+            for (History h : closed) clearThumbnails(h);
+        } finally { lock.unlock(); }
+        Prefs.savePreferences(); fireChanged();
+    }
+
+    private void clearThumbnails(History h) {
+        for (State state : h.states) state.thumbnail = null;
+        if (h.original != null) h.original.thumbnail = null;
+        if (h.lastSaved != null) h.lastSaved.thumbnail = null;
+    }
+
+    java.awt.image.BufferedImage thumbnailOf(int imageID, long key) {
+        lock.lock();
+        try {
+            if (!Thumbnail.enabled()) return null;
+            History h = requireHistory(imageID);
+            State state = selected(h, new long[] {key}).get(0);
+            if (state.thumbnail == null) {
+                for(State other:h.states)if(other.thumbnail!=null&&state.snap.sameDisplay(other.snap)){state.thumbnail=other.thumbnail;return state.thumbnail;}
+                ImagePlus image = state.snap.previewPlane(store);
+                try { state.thumbnail = Thumbnail.capture(image); }
+                finally { image.flush(); }
+            }
+            return state.thumbnail;
+        } catch (IOException ex) { throw new IllegalArgumentException("Could not load thumbnail: " + ex.getMessage(), ex); }
+        finally { lock.unlock(); }
+    }
 
 	private void goTo(History h, int k) {
 		if (k < 0 || k >= h.states.size()) return;
@@ -947,6 +1049,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			int k = indexOf(h, reference.key);
 			if (k >= 0) { goTo(h, k); return; } // also reapply an already-current snapshot
 			State restored = new State(saved ? "Restored last saved state" : "Restored original state", reference.snap);
+			restored.number = h.nextNumber++;
 			restored.clean = reference == h.lastSaved || (h.lastSaved == null && reference.clean);
 			restored.saved = reference == h.lastSaved;
 			restored.pinned = restored.saved;
@@ -1087,18 +1190,27 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		lock.lock();
 		try {
 			History h = requireHistory(imageID); flush(h);
-			int index = indexOf(h, anchor);
-			if (index < 0) throw new IllegalArgumentException("That step is no longer available.");
-			int from, to;
-			if ("through".equals(range)) { from = 1; to = index + 1; }
-			else if ("after".equals(range)) { from = index + 1; to = h.states.size(); }
-			else if ("before".equals(range)) { from = 1; to = index; }
-			else throw new IllegalArgumentException("Unknown step range.");
-			long[] result = new long[Math.max(0, to - from)];
-			for (int i = 0; i < result.length; i++) result[i] = h.states.get(from + i).key;
+            List<Row> timeline = buildView(h).rows;
+            int index=-1;for(int i=0;i<timeline.size();i++)if(timeline.get(i).key==anchor)index=i;
+            if(index<0)throw new IllegalArgumentException("That step is no longer available.");
+            int from,to;
+            if("through".equals(range)){from=1;to=index+1;}
+            else if("after".equals(range)){from=index+1;to=timeline.size();}
+            else if("before".equals(range)){from=1;to=index;}
+            else throw new IllegalArgumentException("Unknown step range.");
+            long[] result=new long[Math.max(0,to-from)];for(int i=0;i<result.length;i++)result[i]=timeline.get(from+i).key;
 			return result;
 		} finally { lock.unlock(); }
 	}
+
+    long[] imageRangeKeys(int imageID,long anchor,String range) {
+        lock.lock();
+        try {
+            long[] keys=rangeKeys(imageID,anchor,range);History h=requireHistory(imageID);java.util.List<Long> selected=new ArrayList<>();
+            for(long key:keys)if(indexOf(h,key)>0)selected.add(key);
+            long[] result=new long[selected.size()];for(int i=0;i<result.length;i++)result[i]=selected.get(i);return result;
+        } finally {lock.unlock();}
+    }
 
 	void annotate(int imageID, long key, String label, String note) {
 		lock.lock();
@@ -1130,6 +1242,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			History h = requireHistory(imageID); flush(h);
 			State state = selected(h, new long[] {key}).get(0);
 			ImagePlus copy = state.snap.toImage(h.imp.getTitle() + " [" + state.label + "]", store);
+			copy.setSlice(Math.max(1, Math.min(copy.getStackSize(), state.snap.displayPlane)));
 			if (state.snap.extras.roi != null) copy.setRoi((Roi) state.snap.extras.roi.clone());
 			return copy;
 		} catch (IOException ex) { throw new IllegalArgumentException("Could not read snapshot: " + ex.getMessage(), ex); }
@@ -1178,12 +1291,13 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			List<Row> rows = new ArrayList<>();
 			int previous = -1;
 			boolean gaps = h.dropped > 0;
-			for (int i = 0; i < h.states.size(); i++) if (wanted.remove(h.states.get(i).key)) {
-				if (i == 0) throw new IllegalArgumentException("The first row is an image state, not an operation. Select later steps.");
-				if (previous >= 0 && i != previous + 1) gaps = true;
-				rows.add(new Row(h.states.get(i), i == h.cursor, i > h.cursor));
-				previous = i;
-			}
+            List<Row> timeline = buildView(h).rows;
+            long baseline = h.states.get(0).key;
+            for (int i=0;i<timeline.size();i++) if(wanted.remove(timeline.get(i).key)) {
+                if(timeline.get(i).key==baseline)throw new IllegalArgumentException("The first row is an image state, not an operation. Select later steps.");
+                if(previous>=0&&i!=previous+1)gaps=true;
+                rows.add(timeline.get(i));previous=i;
+            }
 			if (!wanted.isEmpty()) throw new IllegalArgumentException("Some selected steps are no longer available. Select them again.");
 			return new MacroExport(rows, gaps);
 		} finally { lock.unlock(); }
@@ -1224,12 +1338,19 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	// ---- read-only view for the window (no locking) ---------------------
 
 	static final class Row {
-		final String label, originalLabel, note, time, macroCode;
+		final String label, originalLabel, note, time, macroCode, dimensions;
+		final long timestamp, order;
+		long number, savedNumber;
+		final boolean recorderOnly, shared;
+		final java.awt.image.BufferedImage thumbnail;
 		final boolean included;
 		final long key;
 		final boolean current, future, pinned, saved, clean;
 		Row(State s, boolean current, boolean future) {
 			key = s.key;
+			number = s.number;
+			order = s.order; timestamp = s.time; recorderOnly = s.recorderOnly; shared = s.shared; thumbnail = s.thumbnail;
+			dimensions = s.snap == null ? "" : s.snap.width + " × " + s.snap.height + " · " + s.snap.nChannels + " channel(s), " + s.snap.nSlices + " slice(s), " + s.snap.nFrames + " frame(s) · " + s.snap.bitDepth + " bit";
 			macroCode = s.macroCode;
 			label = s.label;
 			originalLabel = s.originalLabel; note = s.note; included = s.included;
@@ -1246,7 +1367,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		String title;
 		String untracked, problem;
 		int dropped;
-		boolean hasOriginal, hasSaved;
+		boolean hasOriginal, hasSaved, canUndo, canRedo;
 		final List<Row> rows = new ArrayList<>();
 	}
 
@@ -1280,10 +1401,16 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		v.dropped = h.dropped;
 		v.hasOriginal = h.original != null;
 		v.hasSaved = h.lastSaved != null;
+        v.canUndo = h.cursor > 0 || h.problem != null; v.canRedo = h.cursor + 1 < h.states.size();
 		List<State> states = h.states;
 		int cursor = h.cursor;
 		for (int i = 0; i < states.size(); i++)
-			v.rows.add(new Row(states.get(i), i == cursor, i > cursor));
+			{ Row row = new Row(states.get(i), i == cursor, i > cursor); row.savedNumber = h.lastSaved == null ? 0 : h.lastSaved.number; v.rows.add(row); }
+        if (Prefs.get(PREF+"showSharedContext",true) && h.original != null) {
+            for (State shared : sharedContext) if (shared.audience.contains(h.original.key)) v.rows.add(new Row(shared,false,false));
+            long baselineKey = h.states.isEmpty() ? 0 : h.states.get(0).key;
+            v.rows.sort(java.util.Comparator.comparingLong((Row row) -> row.key==baselineKey?Long.MIN_VALUE:row.order).thenComparingLong(row -> row.key));
+        }
 		return v;
 	}
 
@@ -1387,6 +1514,11 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		final Snapshot snap;
 		final long key = NEXT_STATE.incrementAndGet();
 		String macroCode;
+		boolean recorderOnly, shared;
+        final java.util.Set<Long> audience = new java.util.HashSet<>();
+		long number;
+        long order = MacroCapture.nextOrder();
+		java.awt.image.BufferedImage thumbnail;
 		boolean pinned, saved, clean;
 		State(String label, Snapshot snap) { this.label = label; this.originalLabel = label; this.snap = snap; }
 		String timeString() {
@@ -1406,6 +1538,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		State original, lastSaved;
 		final List<Thread> threads = new CopyOnWriteArrayList<>();
 		int cursor = -1;
+		long nextNumber;
 		int dropped;
 		String untracked, problem;
 		boolean retryBaseline;
