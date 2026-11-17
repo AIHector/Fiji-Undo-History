@@ -135,6 +135,11 @@ final class Snapshot {
 		return new Snapshot(imp, prev.planes, prev.labels, prev, ex, true);
 	}
 
+	/** The pixels of prev with the image's current selection, overlay, display...: a step that changed nothing. */
+	static Snapshot same(ImagePlus imp, Snapshot prev) {
+		return new Snapshot(imp, prev.planes, prev.labels, prev, Extras.capture(imp, prev.extras), true);
+	}
+
 	/** What changed from prev, as a step name, for steps that changed no pixels. */
 	String metaChange(Snapshot prev) {
 		return prev == null ? null : extras.changeFrom(prev.extras);

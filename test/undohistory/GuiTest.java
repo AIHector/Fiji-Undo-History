@@ -758,6 +758,160 @@ public class GuiTest {
 		off.changes = false;
 		off.close();
 
+		// 34. Each step carries the macro code that repeats it
+		ImagePlus cod = new ImagePlus("code-test.tif", noise(160, 120, 34));
+		cod.show();
+		waitFor(() -> rows(cod) == 1, 5000);
+		byte[] codOpened = pix(cod);
+		menu("Invert", cod, 2);
+		check("menu command: its code is recorded (" + code(cod, 1).trim() + ")", code(cod, 1).equals("run(\"Invert\");\n"));
+		Thread opt = new Thread(() -> {
+			IJ.run(cod, "Gaussian Blur...", "sigma=2");
+			IJ.run(cod, "Subtract...", "value=10");
+		}, "macro-thread");
+		opt.start();
+		opt.join();
+		waitFor(() -> rows(cod) == 4, 5000);
+		check("macro command: the values are recorded (" + code(cod, 2).trim() + ")",
+				code(cod, 2).equals("run(\"Gaussian Blur...\", \"sigma=2\");\n"));
+		check("each command once (" + code(cod, 3).trim() + ")", code(cod, 3).equals("run(\"Subtract...\", \"value=10\");\n"));
+		byte[] codFinal = pix(cod);
+		cod.setDisplayRange(30, 200);
+		cod.updateAndDraw();
+		waitFor(() -> rows(cod) == 5, 4000);
+		check("display change: setMinAndMax (" + code(cod, 4).trim() + ")", code(cod, 4).equals("setMinAndMax(30, 200);\n"));
+		EventQueue.invokeAndWait(() -> Toolbar.addPlugInTool(brush));
+		int cr = rows(cod);
+		stroke(cod.getCanvas(), 20, 20, 90, 60);
+		waitFor(() -> rows(cod) == cr + 1, 4000);
+		String strokeCode = code(cod, cr);
+		check("brush stroke: drawn as a line, marked as approximate",
+				strokeCode.contains("makeSelection(\"polyline\"") && strokeCode.contains("run(\"Draw\", \"slice\");") && view(cod).rows.size() == cr + 1);
+
+		// a command that changes nothing on its image (Duplicate) leaves no code in another image's step
+		Thread dupT = new Thread(() -> IJ.run(cod, "Duplicate...", "title=code-dup"), "macro-thread");
+		dupT.start();
+		dupT.join();
+		ImagePlus dup = null;
+		for (int i = 0; i < 40 && dup == null; i++) { Thread.sleep(100); dup = ij.WindowManager.getImage("code-dup"); }
+		final ImagePlus dp0 = dup;
+		Thread.sleep(700);
+		if (dp0 != null) {
+			waitFor(() -> rows(dp0) == 1, 4000);
+			menu("Invert", dp0, 2);
+			check("the duplicate's first step has only its own code (" + code(dp0, 1).trim() + ")", code(dp0, 1).equals("run(\"Invert\");\n"));
+			dp0.changes = false;
+			dp0.close();
+		} else check("the duplicate opened", false);
+		WindowManagerHelper.activate(cod);
+
+		// 35. Create Macro: the steps as a .ijm file that repeats them on another image
+		File macroDir = new File(outDir, "macros");
+		Prefs.set(Engine.PREF + "macroSave", Macros.FIXED);
+		Prefs.set(Engine.PREF + "macroFolder", macroDir.getPath());
+		Prefs.set(Engine.PREF + "macroOpenEditor", false);
+		String partial = engine.macroOf(cod.getID(), new int[] {2, 3});
+		check("macro of selected steps 2-3 has only them", partial.contains("// Steps: 2-3.") && partial.contains("sigma=2")
+				&& partial.contains("value=10") && !partial.contains("run(\"Invert\")"));
+		engine.goTo(cod.getID(), 3);
+		File mf = Macros.create(cod.getID(), null);
+		check("Create Macro saves a file in the macro folder (" + (mf == null ? "-" : mf.getName()) + ")",
+				mf != null && mf.isFile() && mf.getParentFile().equals(macroDir) && mf.getName().endsWith(".ijm"));
+		ImagePlus fresh = new ImagePlus("fresh", new ByteProcessor(160, 120, codOpened.clone()));
+		fresh.show();
+		Thread.sleep(400);
+		WindowManagerHelper.activate(fresh);
+		IJ.runMacroFile(mf.getPath());
+		check("running the macro on the opened image gives the same result", Arrays.equals(codFinal, pix(fresh)));
+		fresh.changes = false;
+		fresh.close();
+
+		// 36. Delete a step: its effect is removed, the later steps run again from their code
+		engine.goTo(cod.getID(), 3);
+		Engine.DeletePlan dp = engine.planDelete(cod.getID(), new int[] {1});
+		check("deleting Invert: 2 later steps to run again, all exactly", dp != null && dp.replays >= 2 && dp.notExact.size() == 1);
+		Engine.DeletePlan dp2 = engine.planDelete(cod.getID(), new int[] {1});
+		// steps after the cursor (display, brush) are replayed too; the brush is approximate
+		String err = engine.deleteSteps(cod.getID(), dp2, false);
+		ImagePlus ref = new ImagePlus("ref", new ByteProcessor(160, 120, codOpened.clone()));
+		IJ.run(ref, "Gaussian Blur...", "sigma=2");
+		IJ.run(ref, "Subtract...", "value=10");
+		check("delete Invert: no error (" + err + "), labels " + labels(cod), err == null && labels(cod).startsWith("[Opened, Gaussian Blur, Subtract"));
+		check("delete Invert: the image is as if Invert never ran", Arrays.equals((byte[]) ref.getProcessor().getPixels(), pix(cod)));
+		check("delete Invert: the image stays at the current step's counterpart (" + cursor(cod) + ")", cursor(cod) == 2);
+		check("open state is never deleted", engine.planDelete(cod.getID(), new int[] {0}) == null);
+		int beforeLast = rows(cod);
+		engine.goTo(cod.getID(), beforeLast - 1);
+		byte[] prevPix = null;
+		engine.goTo(cod.getID(), beforeLast - 2);
+		prevPix = pix(cod);
+		engine.goTo(cod.getID(), beforeLast - 1);
+		err = engine.deleteSteps(cod.getID(), engine.planDelete(cod.getID(), new int[] {beforeLast - 1}), false);
+		check("deleting the current (last) step undoes and discards it", err == null && rows(cod) == beforeLast - 1
+				&& Arrays.equals(prevPix, pix(cod)));
+		// a step with no code: Forget only keeps the image and frees the step
+		engine.goTo(cod.getID(), 1);
+		cod.getProcessor().invert();
+		cod.updateAndDraw();
+		waitFor(() -> rows(cod) == 3, 4000);
+		menu("Invert", cod, 4);
+		byte[] afterBoth = pix(cod);
+		Engine.DeletePlan nc = engine.planDelete(cod.getID(), new int[] {2});
+		check("deleting the step without code: the Invert after it runs again exactly (" + nc.notExact + ")", nc.replays == 1 && nc.notExact.isEmpty());
+		Engine.DeletePlan nc1 = engine.planDelete(cod.getID(), new int[] {1});
+		check("replaying past a step without code is flagged (" + nc1.notExact + ")", nc1.notExact.size() == 1 && nc1.notExact.get(0).endsWith("(no macro code)"));
+		err = engine.deleteSteps(cod.getID(), nc1, true);
+		check("Forget only: the step is gone, the image unchanged (" + labels(cod) + ")",
+				err == null && rows(cod) == 3 && Arrays.equals(afterBoth, pix(cod)));
+		cod.changes = false;
+		cod.close();
+
+		// 37. Pause keeps the history; Resume records what changed meanwhile as one step
+		ImagePlus pz = new ImagePlus("pause-test", noise(128, 128, 37));
+		pz.show();
+		waitFor(() -> rows(pz) == 1, 5000);
+		menu("Invert", pz, 2);
+		byte[] beforePause = pix(pz);
+		engine.pause();
+		check("paused: not running, history kept", !Engine.isRunning() && Engine.isPaused() && rows(pz) == 2);
+		menu("Smooth", pz, -1);
+		menu("Invert", pz, -1);
+		check("paused: commands are not recorded", rows(pz) == 2);
+		byte[] whilePaused = pix(pz);
+		engine.start();
+		waitFor(() -> rows(pz) == 3, 3000);
+		check("resume: one step, Changes while paused (" + labels(pz) + ")", rows(pz) == 3 && last(pz).equals("Changes while paused"));
+		IJ.doCommand("Undo");
+		waitFor(() -> cursor(pz) == 1, 3000);
+		check("undo after resume goes back to the state before the pause", Arrays.equals(beforePause, pix(pz)));
+		engine.goTo(pz.getID(), 2);
+		check("redo brings back the paused changes", Arrays.equals(whilePaused, pix(pz)));
+		pz.changes = false;
+		pz.close();
+
+		// 38. Plugins > Macros > Record...: the hidden Recorder makes way, the user's is read instead
+		ImagePlus rc = new ImagePlus("recorder-test", noise(64, 64, 38));
+		rc.show();
+		waitFor(() -> rows(rc) == 1, 5000);
+		WindowManagerHelper.activate(rc);
+		IJ.doCommand("Record...");
+		ij.plugin.frame.Recorder userRec = null;
+		for (int i = 0; i < 40 && (userRec == null || !userRec.isVisible()); i++) { Thread.sleep(100); userRec = ij.plugin.frame.Recorder.getInstance(); }
+		check("the user's Recorder opens, visible", userRec != null && userRec.isVisible());
+		menu("Invert", rc, 2);
+		check("with the user's Recorder open, code is still recorded (" + code(rc, 1).trim() + ")", code(rc, 1).equals("run(\"Invert\");\n"));
+		if (userRec != null) {
+			final ij.plugin.frame.Recorder ur = userRec;
+			EventQueue.invokeAndWait(ur::close);
+		}
+		waitFor(() -> ij.plugin.frame.Recorder.getInstance() != null, 3000);
+		check("closing it brings the hidden Recorder back", ij.plugin.frame.Recorder.getInstance() != null
+				&& !ij.plugin.frame.Recorder.getInstance().isVisible());
+		menu("Invert", rc, 3);
+		check("and code is recorded again (" + code(rc, 2).trim() + ")", code(rc, 2).equals("run(\"Invert\");\n"));
+		rc.changes = false;
+		rc.close();
+
 		// 21. The window renders
 		WindowManagerHelper.activate(imp);
 		EventQueue.invokeAndWait(HistoryWindow::showWindow);
@@ -848,6 +1002,8 @@ public class GuiTest {
 		for (Engine.Row r : view(imp).rows) sb.append(sb.length() > 1 ? ", " : "").append(r.label);
 		return sb.append("]").toString();
 	}
+
+	static String code(ImagePlus imp, int k) { Engine.View v = view(imp); return k < v.rows.size() ? v.rows.get(k).code : "?"; }
 
 	static String last(ImagePlus imp) { Engine.View v = view(imp); return v.rows.get(v.rows.size() - 1).label; }
 
