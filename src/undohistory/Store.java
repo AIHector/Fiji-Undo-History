@@ -377,6 +377,24 @@ final class Store {
 
 	String sessionDirPath() { return sessionDir == null ? null : sessionDir.getPath(); }
 
+	/** Forgets every plane (the engine dropped all its steps) and deletes this session's spill folder. */
+	void endSession() {
+		for (SpillFile f : new ArrayList<>(files)) deleteFile(f);
+		current = null;
+		ramPlanes.clear();
+		ramBytes = 0;
+		diskBytes = 0;
+		pool.clear();
+		poolBytes = 0;
+		lastProblem = null;
+		if (sessionDir != null) {
+			try { if (sessionLock != null) sessionLock.channel().close(); } catch (IOException ignored) { }
+			sessionLock = null;
+			deleteTree(sessionDir);
+			sessionDir = null;
+		}
+	}
+
 	// ---- chunks, comparison, hashing ----------------------------------------
 
 	static Object[] toChunks(Object live, int type, int n, Store pool) {
