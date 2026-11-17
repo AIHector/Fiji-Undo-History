@@ -13,8 +13,7 @@ The current implementation remains on `main`. Missing historical checkpoints wer
 | [v1.3.0](https://github.com/AIHector/Fiji-Undo-History/tree/v1.3.0) | [1cc396e](https://github.com/AIHector/Fiji-Undo-History/commit/1cc396eba5db4686399d512eaea2e2c1e8663c02) | accepted selected-step macro creation |
 | [v1.4.0-dev1](https://github.com/AIHector/Fiji-Undo-History/tree/v1.4.0-dev1) | [f84d94d](https://github.com/AIHector/Fiji-Undo-History/commit/f84d94db56afdaac4c38332e125dede4f7113d9e) | batch/context history actions and recording controls |
 | [v1.5.0-dev1](https://github.com/AIHector/Fiji-Undo-History/tree/v1.5.0-dev1) | [686835e](https://github.com/AIHector/Fiji-Undo-History/commit/686835e036eeb26b52aede5615b730f68a6f75b2) | previous installed reference reset and control layout |
-
-| [v1.6.0-dev1](https://github.com/AIHector/Fiji-Undo-History/tree/v1.6.0-dev1) | version tag | current installed history table, image-scoped macro journal, shared context, previews/export and configurable toolbar |
+| [v1.6.0-dev1](https://github.com/AIHector/Fiji-Undo-History/tree/v1.6.0-dev1) | [2b883a8](https://github.com/AIHector/Fiji-Undo-History/commit/2b883a83a63d6a28a1c10a4b7e1b8823e3a9a674) | current installed history table, image-scoped macro journal, shared context, previews/export and configurable toolbar |
 
 ## Alternative or same-number snapshots
 
