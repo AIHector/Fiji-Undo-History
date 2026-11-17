@@ -18,7 +18,6 @@ import ij.macro.Interpreter;
 import java.awt.AWTEvent;
 import java.awt.EventQueue;
 import java.awt.Frame;
-import java.awt.KeyEventDispatcher;
 import java.awt.KeyboardFocusManager;
 import java.awt.Toolkit;
 import java.awt.Window;
@@ -75,15 +74,14 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 
 	/** Share of Fiji's maximum memory the history may use (the rest stays for your work). */
 	int memoryPercent() { return (int) Prefs.get(PREF + "memoryPercent", 33); }
-	/** Off by default: the disk is used only when the user turns it on (in the Options, or when memory runs out). */
-	boolean useDisk() { return Prefs.get(PREF + "useDisk", false); }
+	boolean useDisk() { return Prefs.get(PREF + "useDisk", true); }
 	String diskFolderPref() { return Prefs.get(PREF + "diskFolder", ""); }
 	File diskFolder() {
 		String f = diskFolderPref();
 		return f.isEmpty() ? new File(System.getProperty("java.io.tmpdir"), "FijiUndoHistory") : new File(f);
 	}
-	/** Share of the free space on the disk folder's drive that the history may use. */
-	int diskPercent() { return (int) Prefs.get(PREF + "diskPercent", 33); }
+	/** Disk budget in GB; 0 = automatic (half of the free space, at most 50 GB). */
+	double diskGBPref() { return Prefs.get(PREF + "diskGB", 0); }
 	double minFreeDiskGB() { return Prefs.get(PREF + "minFreeDiskGB", 5); }
 
 	long ramBudgetBytes() {
@@ -95,19 +93,20 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	long diskBudgetBytes() {
 		double test = Prefs.get(PREF + "testDiskMB", 0);
 		if (test > 0) return (long) (test * 1048576);
+		double gb = diskGBPref();
+		if (gb > 0) return (long) (gb * 1073741824L);
 		File f = diskFolder();
 		while (f != null && !f.exists()) f = f.getParentFile();
 		long free = f == null ? 0 : f.getUsableSpace();
-		// the history's own spill files count as free: the budget must not shrink as the history fills it
-		return (free + store.diskBytes) / 100 * Math.max(1, Math.min(90, diskPercent()));
+		return Math.min(50L << 30, free / 2);
 	}
 
 	long memoryMB() { return ramBudgetBytes() >> 20; }
+	int maxSteps() { return (int) Prefs.get(PREF + "maxSteps", 100); }
+	boolean replaceUndo() { return Prefs.get(PREF + "replaceUndo", true); }
+	boolean redoKey() { return Prefs.get(PREF + "redoKey", true); }
 	/** Cmd/Ctrl+Shift+Z redoes, instead of opening Image ▸ Color ▸ Channels Tool... (ImageJ's own use of that key). */
-	boolean redoShiftZ() { return Prefs.get(PREF + "redoShiftZ", true); }
-	/** Whether the startup macro starts recording, and shows the window. */
-	static boolean startAtLaunch() { return Prefs.get(PREF + "startAtLaunch", true); }
-	static boolean showAtStartup() { return Prefs.get(PREF + "showAtStartup", true); }
+	boolean redoShiftZ() { return Prefs.get(PREF + "redoShiftZ", false); }
 
 	static final String CHANNELS_TOOL = "Channels Tool...";
 	/** ImageJ's shortcut table keys a Shift shortcut as its key code + 200. */
@@ -219,91 +218,39 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 				}
 			} finally { lock.unlock(); }
 		}
-		Toolkit.getDefaultToolkit().addAWTEventListener(mouseWatcher, AWTEvent.MOUSE_EVENT_MASK);
-		KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(redoKeys);
+		Toolkit.getDefaultToolkit().addAWTEventListener(new AWTEventListener() {
+			public void eventDispatched(AWTEvent e) {
+				if (e.getID() == MouseEvent.MOUSE_PRESSED) {
+					mouseDown = true;
+					if (e.getSource() instanceof ImageCanvas)
+						commitBeforeStroke(((ImageCanvas) e.getSource()).getImage());
+				} else if (e.getID() == MouseEvent.MOUSE_RELEASED) {
+					mouseDown = false;
+					// a tool may have edited the overlay or the selection without touching the pixels
+					if (e.getSource() instanceof ImageCanvas) metaChanged(((ImageCanvas) e.getSource()).getImage(), null);
+				}
+			}
+		}, AWTEvent.MOUSE_EVENT_MASK);
+		KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(e -> {
+			if (e.getID() != KeyEvent.KEY_PRESSED || e.getKeyCode() != KeyEvent.VK_Z || !redoKey())
+				return false;
+			boolean cmd = IJ.isMacOSX() ? e.isMetaDown() : e.isControlDown();
+			if (!cmd || !e.isAltDown() || e.isShiftDown())
+				return false;
+			if (altGrInText(IJ.isMacOSX(), e.isControlDown(), e.isAltDown(), focusInText()))
+				return false; // AltGr+Z types a letter on some keyboards (ż in Polish): leave it to the text field
+			if (WindowManager.getCurrentImage() == null)
+				return false;
+			new Thread(this::redoActive, "UndoHistory-redo").start();
+			return true;
+		});
 		applyShiftZ(redoShiftZ());
 		lastRmQuick = quickRm();
 		lastRtQuick = quickRt();
 		ticker = new Thread(this::tickLoop, "UndoHistory-ticker");
 		ticker.setDaemon(true);
 		ticker.start();
-		fireChanged();
 	}
-
-	/**
-	 * Stops recording: every history (closed images included) is forgotten, its memory and spill files are freed,
-	 * and Edit ▸ Undo and Cmd/Ctrl+Shift+Z go back to ImageJ.
-	 */
-	void stop() {
-		Thread t;
-		synchronized (this) {
-			if (!running) return;
-			running = false;
-			Executer.removeCommandListener(this);
-			ImagePlus.removeImageListener(this);
-			Roi.removeRoiListener(this);
-			Toolkit.getDefaultToolkit().removeAWTEventListener(mouseWatcher);
-			KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(redoKeys);
-			applyShiftZ(false);
-			t = ticker;
-			ticker = null;
-		}
-		if (t != null) {
-			t.interrupt();
-			try { t.join(2000); } catch (InterruptedException ignored) { }
-		}
-		lock.lock();
-		try {
-			pendingOpen.clear();
-			History h;
-			while ((h = pendingClose.poll()) != null) releaseAll(h);
-			for (History c : closed) releaseAll(c);
-			closed.clear();
-			for (History o : histories.values()) releaseAll(o);
-			histories.clear();
-			lastViews.clear();
-			commandThreads.clear();
-			store.endSession();
-		} finally { lock.unlock(); }
-		fireChanged();
-	}
-
-	/** Steps that stopping would forget: those after the opened state of each image, and closed images. */
-	int recordedSteps() {
-		lock.lock();
-		try {
-			int n = closed.size();
-			for (History h : histories.values()) n += Math.max(0, h.states.size() - 1);
-			return n;
-		} finally { lock.unlock(); }
-	}
-
-	private final AWTEventListener mouseWatcher = e -> {
-		if (e.getID() == MouseEvent.MOUSE_PRESSED) {
-			mouseDown = true;
-			if (e.getSource() instanceof ImageCanvas)
-				commitBeforeStroke(((ImageCanvas) e.getSource()).getImage());
-		} else if (e.getID() == MouseEvent.MOUSE_RELEASED) {
-			mouseDown = false;
-			// a tool may have edited the overlay or the selection without touching the pixels
-			if (e.getSource() instanceof ImageCanvas) metaChanged(((ImageCanvas) e.getSource()).getImage(), null);
-		}
-	};
-
-	/** Cmd/Ctrl+Alt+Z redoes. */
-	private final KeyEventDispatcher redoKeys = e -> {
-		if (e.getID() != KeyEvent.KEY_PRESSED || e.getKeyCode() != KeyEvent.VK_Z)
-			return false;
-		boolean cmd = IJ.isMacOSX() ? e.isMetaDown() : e.isControlDown();
-		if (!cmd || !e.isAltDown() || e.isShiftDown())
-			return false;
-		if (altGrInText(IJ.isMacOSX(), e.isControlDown(), e.isAltDown(), focusInText()))
-			return false; // AltGr+Z types a letter on some keyboards (ż in Polish): leave it to the text field
-		if (WindowManager.getCurrentImage() == null)
-			return false;
-		new Thread(this::redoActive, "UndoHistory-redo").start();
-		return true;
-	};
 
 	/** On Windows and Linux the AltGr key is reported as Ctrl+Alt; in a text field it may be typing a character. */
 	static boolean altGrInText(boolean mac, boolean ctrl, boolean alt, boolean textFocus) {
@@ -399,6 +346,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	public String commandExecuting(String cmd) {
 		if (!running || cmd == null) return cmd;
 		if (cmd.equals("Undo")) {
+			if (!replaceUndo()) return cmd;
 			ImagePlus imp = WindowManager.getCurrentImage();
 			if (imp != null && !histories.containsKey(imp.getID())) {
 				lock.lock();
@@ -463,14 +411,13 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 
 	static boolean isOwnCommand(String cmd) {
 		return cmd.startsWith("Undo History") || cmd.equals("Redo") || cmd.startsWith("Keep This State")
-				|| cmd.startsWith("Clear History") || cmd.equals("Start Undo History") || cmd.equals("Stop Undo History")
-				|| cmd.equals("Start/Stop Undo History");
+				|| cmd.startsWith("Clear History") || cmd.equals("Start Undo History");
 	}
 
 	// ---- periodic work --------------------------------------------------
 
 	private void tickLoop() {
-		while (running) {
+		while (true) {
 			try {
 				Thread.sleep(150);
 				tick();
@@ -514,7 +461,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	private void pollShared(long now) {
 		if (now - lastSharedPoll < 500) return;
 		lastSharedPoll = now;
-		long rm = quickRm(), rt = quickRt();
+		long rm = Extras.trackRoiManager() ? quickRm() : 0, rt = Extras.trackResults() ? quickRt() : 0;
 		boolean rmChanged = rm != lastRmQuick, rtChanged = rt != lastRtQuick;
 		lastRmQuick = rm;
 		lastRtQuick = rt;
@@ -604,6 +551,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		heir.cursor = heir.states.size() - 1;
 		heir.dropped += old.dropped;
 		old.states.clear();
+		enforceStepLimit(heir);
 		fireChanged();
 	}
 
@@ -669,7 +617,6 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			h.untracked = "image (" + (size >> 20) + " MB) is larger than the history's memory ("
 					+ (store.ramBudget >> 20) + " MB)" + (store.diskEnabled ? " plus disk (" + (store.diskBudget >> 20) + " MB)" : "")
 					+ ". Raise them in Options";
-			offerDisk(h);
 		} else {
 			long t0 = System.nanoTime();
 			try {
@@ -690,7 +637,6 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			} catch (Store.NoRoomException e) {
 				h.untracked = e.getMessage();
 				h.retryBaseline = true;
-				offerDisk(h);
 			}
 		}
 	}
@@ -727,11 +673,9 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			h.problem = null;
 		} catch (Store.NoRoomException e) {
 			h.problem = "Last change not recorded: " + e.getMessage();
-			h.refusedLabel = h.pendingCommand != null ? pretty(h.pendingCommand) : h.pendingTool;
 			h.pendingCommand = null;
 			h.pendingTool = null;
 			IJ.showStatus("Undo History: " + h.problem);
-			offerDisk(h);
 			fireChanged();
 			return;
 		}
@@ -766,6 +710,7 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		h.states.add(st);
 		h.cursor = h.states.size() - 1;
 		retain(s, st.time);
+		enforceStepLimit(h);
 		fireChanged();
 	}
 
@@ -839,50 +784,6 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		fireChanged();
 	}
 
-	private volatile boolean diskOffered;
-
-	/**
-	 * Memory is full and disk use is off: asks (once per session) whether to keep older steps on disk, and if so
-	 * records the change that was just refused. Never waits: the question runs on its own thread.
-	 */
-	private void offerDisk(final History h) {
-		if (store.diskEnabled || diskOffered || !Prefs.get(PREF + "offerDisk", true)) return;
-		diskOffered = true;
-		final File folder = diskFolder();
-		new Thread(() -> {
-			ij.gui.GenericDialog gd = new ij.gui.GenericDialog("Undo History");
-			gd.addMessage("The memory for the history is full: the latest change of\n\"" + h.title + "\" was not recorded.\n \n"
-					+ "Undo History can keep older steps on disk instead, in\n" + folder.getPath() + "\n"
-					+ "using at most " + diskPercent() + "% of the free space on that disk (now "
-					+ IJ.d2s(diskBudgetBytes() / 1073741824.0, 1) + " GB).\n \n"
-					+ "You can change this later in Edit > Undo History Options.");
-			gd.enableYesNoCancel("Keep older steps on disk", "Not now");
-			gd.hideCancelButton();
-			gd.showDialog();
-			if (!gd.wasOKed()) return;
-			Prefs.set(PREF + "useDisk", true);
-			settingsChanged();
-			retryRefused(h);
-		}, "UndoHistory-askDisk").start();
-	}
-
-	/** Records the change that was refused for lack of room (or the opened state), now that there may be room. */
-	void retryRefused(History h) {
-		lock.lock();
-		try {
-			if (h.imp == null || histories.get(h.imp.getID()) != h) return;
-			if (h.problem != null) {
-				h.pendingTool = h.refusedLabel;
-				h.metaOnly = false;
-				h.dirty = true;
-			}
-			if (h.dirty || h.retryBaseline) {
-				h.dirty = true;
-				flush(h);
-			}
-		} finally { lock.unlock(); }
-	}
-
 	private void markSaved(History h) {
 		if (h.states.isEmpty()) return;
 		State s = h.states.get(h.cursor);
@@ -899,6 +800,15 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 			h.cursor = 0;
 		}
 		fireChanged();
+	}
+
+	private void enforceStepLimit(History h) {
+		int max = Math.max(1, maxSteps());
+		while (h.states.size() - 1 > max) {
+			int i = oldestRemovable(h);
+			if (i < 0) break;
+			removeState(h, i);
+		}
 	}
 
 	/** Gives back the memory of closed images first, then drops the oldest droppable step of any image. */
@@ -1011,6 +921,29 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		fireChanged();
 	}
 
+	/**
+	 * Deletes step k and frees its snapshot (memory or disk), except image planes that other steps share.
+	 * The first step (the image as opened) stays. If k is the current step, the image first goes back to the
+	 * previous step. Returns false if nothing was deleted.
+	 */
+	boolean delete(int imageID, int k) {
+		History h = histories.get(imageID);
+		if (h == null) return false;
+		lock.lock();
+		try { flush(h); } finally { lock.unlock(); }
+		if (k <= 0 || k >= h.states.size()) return false;
+		if (k == h.cursor) goTo(imageID, k - 1);
+		lock.lock();
+		try {
+			if (k <= 0 || k >= h.states.size() || k == h.cursor) return false;
+			release(h.states.remove(k).snap);
+			if (k < h.cursor) h.cursor--;
+			h.dropped++;
+		} finally { lock.unlock(); }
+		fireChanged();
+		return true;
+	}
+
 	ImagePlus copyOf(int imageID, int k) {
 		History h = histories.get(imageID);
 		if (h == null || k < 0 || k >= h.states.size()) return null;
@@ -1027,11 +960,12 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 	}
 
 	void settingsChanged() {
-		if (running) applyShiftZ(redoShiftZ());
+		applyShiftZ(redoShiftZ());
 		lock.lock();
 		try {
 			applySettings();
 			for (History h : histories.values()) {
+				enforceStepLimit(h);
 				if (h.states.isEmpty() && !h.imp.getStack().isVirtual()) {
 					h.retryBaseline = true; // e.g. budgets were raised: try again at the next change
 					h.dirty = true;
@@ -1221,8 +1155,6 @@ final class Engine implements ImageListener, CommandListener, RoiListener {
 		volatile boolean metaOnly;
 		volatile long lastUpdate;
 		volatile String pendingCommand, pendingTool;
-		/** The name of the change that could not be recorded for lack of room. */
-		volatile String refusedLabel;
 		boolean lastChanges;
 		History(ImagePlus imp) { this.imp = imp; this.title = imp.getTitle(); }
 	}

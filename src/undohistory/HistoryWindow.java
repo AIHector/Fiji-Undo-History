@@ -40,8 +40,8 @@ final class HistoryWindow extends JFrame {
 	private final JLabel header = new JLabel(" ");
 	private final JLabel footer = new JLabel(" ");
 	private final JButton undo = new JButton("Undo"), redo = new JButton("Redo"),
-			keep = new JButton("Keep"), copy = new JButton("Copy"),
-			clear = new JButton("Clear"), options = new JButton("Options…"), onOff = new JButton("Stop");
+			keep = new JButton("Keep"), copy = new JButton("Copy"), delete = new JButton("Delete"),
+			clear = new JButton("Clear"), options = new JButton("Options…");
 	private final Runnable refresher = this::refresh;
 	private final Timer timer;
 	private int imageID;
@@ -78,6 +78,14 @@ final class HistoryWindow extends JFrame {
 		keep.setToolTipText("Keep the selected step: it is never dropped when memory runs short");
 		copy.setToolTipText("Open the selected step (or the current one) as a new image, leaving this one as it is");
 		clear.setToolTipText("Forget all steps of this image except the current one");
+		delete.setToolTipText("Delete the selected step and free its memory or disk space at once (the step you are on: "
+			+ "the image goes back to the previous step first). The first step stays.");
+		delete.addActionListener(e -> {
+			final int id = imageID, k = selectedOrCurrent();
+			run(() -> {
+				if (!engine.delete(id, k)) IJ.showStatus("Undo History: the first step (the image as opened) cannot be deleted");
+			});
+		});
 		undo.addActionListener(e -> run(engine::undoActive));
 		redo.addActionListener(e -> run(engine::redoActive));
 		keep.addActionListener(e -> engine.togglePin(imageID, selectedOrCurrent()));
@@ -90,21 +98,15 @@ final class HistoryWindow extends JFrame {
 				engine.clear(imageID);
 		});
 		options.addActionListener(e -> run(Undo_History::showOptions));
-		onOff.addActionListener(e -> run(() -> new Undo_History().run("toggle")));
 
-		JPanel buttons = new JPanel(new GridLayout(2, 3, 4, 4));
+		JPanel buttons = new JPanel(new GridLayout(2, 4, 4, 4));
 		buttons.setBorder(BorderFactory.createEmptyBorder(4, 6, 2, 6));
-		for (JButton b : new JButton[] {undo, redo, keep, copy, clear, options}) buttons.add(b);
+		for (JButton b : new JButton[] {undo, redo, keep, copy, delete, clear, options}) buttons.add(b);
 		JPanel south = new JPanel(new BorderLayout());
 		south.add(buttons, BorderLayout.NORTH);
 		south.add(footer, BorderLayout.SOUTH);
 
-		JPanel north = new JPanel(new BorderLayout());
-		north.add(header, BorderLayout.CENTER);
-		JPanel onOffBox = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.RIGHT, 6, 6));
-		onOffBox.add(onOff);
-		north.add(onOffBox, BorderLayout.EAST);
-		getContentPane().add(north, BorderLayout.NORTH);
+		getContentPane().add(header, BorderLayout.NORTH);
 		getContentPane().add(new JScrollPane(list), BorderLayout.CENTER);
 		getContentPane().add(south, BorderLayout.SOUTH);
 		setSize(380, 460);
@@ -142,12 +144,8 @@ final class HistoryWindow extends JFrame {
 		ImagePlus imp = WindowManager.getCurrentImage();
 		Engine.View v = imp == null ? null : engine.view(imp.getID());
 		int id = imp == null ? 0 : imp.getID();
-		boolean running = Engine.isRunning();
-		int stamp = v == null ? (running ? 0 : 1) : java.util.Objects.hash(id, v.rows.size(), v.dropped, rowsSignature(v));
-		onOff.setText(running ? "Stop" : "Start");
-		onOff.setToolTipText(running ? "Stop recording and forget the history (Edit ▸ Start/Stop Undo History)"
-				: "Start recording a history for every open image (Edit ▸ Start/Stop Undo History)");
-		String mem = !running ? "Stopped: Edit ▸ Undo is ImageJ's single undo" : "Memory " + mb(engine.usedBytes()) + " / " + gb(engine.store.ramBudget)
+		int stamp = v == null ? 0 : java.util.Objects.hash(id, v.rows.size(), v.dropped, rowsSignature(v));
+		String mem = "Memory " + mb(engine.usedBytes()) + " / " + gb(engine.store.ramBudget)
 				+ (engine.store.diskEnabled ? " · Disk " + mb(engine.diskBytes()) + " / " + gb(engine.store.diskBudget) : "");
 		footer.setText(mem);
 		footer.setToolTipText(engine.trackedImages() + " image(s) tracked"
@@ -158,8 +156,8 @@ final class HistoryWindow extends JFrame {
 		model.clear();
 		boolean enabled = v != null && v.untracked == null;
 		for (JButton b : new JButton[] {undo, redo, keep, copy, clear}) b.setEnabled(enabled);
-		if (!running) { header.setText("<html>Undo History is stopped<br><span style='font-weight:normal'>Start records every open image from now on</span></html>"); return; }
 		if (imp == null) { header.setText("No image open"); return; }
+		if (!Engine.isRunning()) { header.setText("Not running — use Plugins ▸ Undo History ▸ Start Undo History"); return; }
 		if (v == null) { header.setText(imp.getTitle() + ": not tracked"); return; }
 		if (v.untracked != null) {
 			header.setText("<html>" + esc(v.title) + "<br><span style='font-weight:normal'>Not tracked: " + esc(v.untracked) + "</span></html>");
