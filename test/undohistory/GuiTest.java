@@ -669,6 +669,77 @@ public class GuiTest {
 			}
 		}
 
+		// Selected-history macro export: actual recording, exact options, order, drafts, and deletion.
+		Prefs.set(Engine.PREF + "testMemoryMB", 512);
+		engine.settingsChanged();
+		ImagePlus mx = new ImagePlus("macro-export-test", noise(96, 96, 71));
+		mx.show(); waitFor(() -> rows(mx) == 1, 5000);
+		EventQueue.invokeAndWait(() -> {
+			Prefs.set("recorder.mode", "Macro");
+			new ij.plugin.frame.Recorder();
+		});
+		menu("Invert", mx, 2);
+		check("native recorder code is attached to its history step", view(mx).rows.get(1).macroCode != null
+				&& view(mx).rows.get(1).macroCode.contains("run(\"Invert\")"));
+		Thread exactOptions = new Thread(() -> IJ.run(mx, "Gaussian Blur...", "sigma=2.75"), "export-options");
+		exactOptions.start(); exactOptions.join();
+		waitFor(() -> rows(mx) == 3, 5000);
+		Engine.View mv = view(mx);
+		check("macro options retain exact Gaussian radius", mv.rows.get(2).macroCode != null
+				&& mv.rows.get(2).macroCode.contains("sigma=2.75"));
+		MacroExport exported = engine.exportMacro(mx.getID(), new long[] {mv.rows.get(2).key, mv.rows.get(1).key});
+		check("export uses history order, even if selection keys are reversed", exported.missing == 0
+				&& exported.code.indexOf("Invert") < exported.code.indexOf("Gaussian Blur"));
+		byte[] expectedMacroPixels = pix(mx);
+		ImagePlus replay = engine.copyOf(mx.getID(), 0);
+		replay.setTitle("macro-replay-test"); replay.show();
+		WindowManagerHelper.activate(replay);
+		IJ.runMacro(exported.code);
+		check("exported macro replays exact pixels on matching input", Arrays.equals(expectedMacroPixels, pix(replay)));
+		replay.changes = false; replay.close();
+		WindowManagerHelper.activate(mx);
+		EventQueue.invokeAndWait(() -> ij.plugin.frame.Recorder.getInstance().close());
+		menu("Smooth", mx, 4);
+		Engine.View missingView = view(mx);
+		MacroExport draft = engine.exportMacro(mx.getID(), new long[] {missingView.rows.get(3).key});
+		check("unrecorded command becomes a stopped draft, never guessed defaults", draft.missing == 1
+				&& draft.code.contains("exit(") && draft.code.contains("TODO:"));
+		byte[] beforeDraft = pix(mx);
+		// The draft deliberately opens an explanatory stop dialog; dismiss only this test JVM's message.
+		Thread dismissDraft = new Thread(() -> {
+			try {
+				for (int i = 0; i < 60; i++) {
+					Thread.sleep(50);
+					final java.awt.Dialog[] dialog = new java.awt.Dialog[1];
+					EventQueue.invokeAndWait(() -> {
+						for (Window window : Window.getWindows())
+							if (window instanceof ij.gui.MessageDialog && window.isVisible()) dialog[0] = (java.awt.Dialog) window;
+						if (dialog[0] != null) dialog[0].dispatchEvent(new java.awt.event.WindowEvent(dialog[0], java.awt.event.WindowEvent.WINDOW_CLOSING));
+					});
+					if (dialog[0] != null) return;
+				}
+			} catch (Exception ex) { throw new RuntimeException(ex); }
+		}, "dismiss-test-draft-message");
+		dismissDraft.start();
+		IJ.runMacro(draft.code);
+		dismissDraft.join();
+		check("incomplete draft stops before changing pixels", Arrays.equals(beforeDraft, pix(mx)));
+		long retainedKey = missingView.rows.get(2).key;
+		check("delete earlier step succeeds", engine.delete(mx.getID(), 1));
+		MacroExport retained = engine.exportMacro(mx.getID(), new long[] {retainedKey});
+		check("stable row identity survives deletion and export warns about removed steps", retained.code.contains("sigma=2.75")
+				&& retained.code.contains("removed"));
+		boolean staleRejected = false;
+		try { engine.exportMacro(mx.getID(), new long[] {missingView.rows.get(1).key}); }
+		catch (IllegalArgumentException ex) { staleRejected = true; }
+		check("deleted selected row is rejected instead of exporting another row", staleRejected);
+		check("opened baseline cannot be deleted", !engine.delete(mx.getID(), 0));
+		int beforeDelete = rows(mx);
+		check("deleting current step restores previous step and removes only chosen snapshot",
+				engine.delete(mx.getID(), beforeDelete - 1) && rows(mx) == beforeDelete - 1
+				&& Arrays.equals(expectedMacroPixels, pix(mx)));
+		mx.changes = false; mx.close();
+
 		// 21. The window renders
 		WindowManagerHelper.activate(imp);
 		EventQueue.invokeAndWait(HistoryWindow::showWindow);

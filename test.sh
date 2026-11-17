@@ -8,4 +8,5 @@ OUT="$HERE/build/test-classes"
 rm -rf "$OUT" && mkdir -p "$OUT"
 "$JAVA_BIN/javac" --release 8 -Xlint:-options -encoding UTF-8 -cp "$IJ" -d "$OUT" "$HERE"/src/undohistory/*.java "$HERE"/test/undohistory/*.java
 cp "$HERE/src/plugins.config" "$OUT/"
-"$JAVA_BIN/java" -Xmx2g -Dapple.awt.UIElement=true -cp "$OUT:$IJ" undohistory.GuiTest "$HERE/build"
+mkdir -p "$HERE/build/test-home"
+"$JAVA_BIN/java" -Duser.home="$HERE/build/test-home" -Xmx2g -Dapple.awt.UIElement=true -cp "$OUT:$IJ" undohistory.GuiTest "$HERE/build"
